@@ -1,0 +1,66 @@
+{
+  "repaired_1366x768": {
+    "idle": {
+      "fps_mean": 37.7,
+      "median_ms": 33.5,
+      "p95_ms": 50.4,
+      "frames_over_25ms": 98,
+      "samples": 188
+    },
+    "scroll": {
+      "fps_mean": 52.3,
+      "median_ms": 16.8,
+      "p95_ms": 33.6,
+      "frames_over_25ms": 32,
+      "samples": 262
+    }
+  },
+  "repaired_1440x900": {
+    "idle": {
+      "fps_mean": 36.0,
+      "median_ms": 33.6,
+      "p95_ms": 50.4,
+      "frames_over_25ms": 105,
+      "samples": 180
+    },
+    "scroll": {
+      "fps_mean": 51.3,
+      "median_ms": 16.8,
+      "p95_ms": 33.6,
+      "frames_over_25ms": 31,
+      "samples": 256
+    }
+  },
+  "original_1366x768": {
+    "idle": {
+      "fps_mean": 10.4,
+      "median_ms": 100.8,
+      "p95_ms": 185,
+      "frames_over_25ms": 47,
+      "samples": 52
+    },
+    "scroll": {
+      "fps_mean": 10.6,
+      "median_ms": 84.1,
+      "p95_ms": 168,
+      "frames_over_25ms": 51,
+      "samples": 53
+    }
+  },
+  "original_1440x900": {
+    "idle": {
+      "fps_mean": 8.4,
+      "median_ms": 117.5,
+      "p95_ms": 218.4,
+      "frames_over_25ms": 38,
+      "samples": 42
+    },
+    "scroll": {
+      "fps_mean": 9.2,
+      "median_ms": 100.9,
+      "p95_ms": 134.4,
+      "frames_over_25ms": 45,
+      "samples": 46
+    }
+  }
+}

@@ -1,0 +1,87 @@
+{
+  "T1_rapid_interaction": {
+    "steps": [
+      "scenario x12 ok",
+      "crew churn ok",
+      "telemetry tab churn ok",
+      "NASA datasets modal churn ok",
+      "downlink modal churn ok",
+      "checklist double-click ok"
+    ],
+    "scenario_buttons": 4,
+    "crew_buttons": 4,
+    "tab_buttons": 3,
+    "checklist_buttons": 0,
+    "dom": {
+      "scrollWidth": 1265,
+      "innerWidth": 1280,
+      "nan": false,
+      "undefinedText": 0,
+      "dialogs": 0
+    },
+    "errors": [
+      "console: Failed to load resource: the server responded with a status of 402 ()"
+    ],
+    "warnings": []
+  },
+  "T2_offline_fallback": {
+    "reply_ms": 170,
+    "excerpt": "Team ZeroG — NASA Space Apps Challenge 2026 · All thresholds & protocols editable in NASA_DATA_CONFIG\n\nNASA Open Data & Scientific Validity: OSD-51 · OSD-194 · NASA-STD-3001 Vol.1 · NASA-STD-3001 Vol.2 · HRP-SM — CLICK TO INSPECT",
+    "error_banner": false,
+    "dom": {
+      "scrollWidth": 1351,
+      "innerWidth": 1366,
+      "nan": false,
+      "undefinedText": 0,
+      "dialogs": 0
+    },
+    "errors": [
+      "console: Failed to load resource: net::ERR_FAILED"
+    ]
+  },
+  "T3_arabic": {
+    "reply_ms": 165,
+    "arabic_reply_present": true,
+    "excerpt": "نبضات القلب ١٣٢ ومعدل الأكسجين منخفض، ما هو البروتوكول؟\n\nMED-AI 🛡️ Onboard Local AI\n\nالتقييم السريري — CDR AHMED TAHA\n\nالحالة النشطة: مدار طبيعي (الحالة الأساسية) (طبيعي) · الحالة العامة: طبيعي\n\nالقياسات المباشرة (متحقق منها عند 04:20:01 MET):\n\nمعدل ضربات القلب: 60 نبضة/دقيقة [طبيعي]\n\nتشبع الأكسجين",
+    "dom": {
+      "scrollWidth": 753,
+      "innerWidth": 768,
+      "nan": false,
+      "undefinedText": 0,
+      "dialogs": 0
+    },
+    "errors": [
+      "console: Failed to load resource: net::ERR_FAILED"
+    ]
+  },
+  "T4_unsupported_apis": {
+    "steps": [
+      "voice toggle clicked",
+      "sources clicked",
+      "configure clicked"
+    ],
+    "dom": {
+      "scrollWidth": 1425,
+      "innerWidth": 1440,
+      "nan": false,
+      "undefinedText": 0,
+      "dialogs": 0
+    },
+    "errors": []
+  },
+  "T5_stale_reply_race": {
+    "dom": {
+      "scrollWidth": 1905,
+      "innerWidth": 1920,
+      "nan": false,
+      "undefinedText": 0,
+      "dialogs": 0
+    },
+    "steps": "four rapid sends interleaved with scenario switches",
+    "errors": [
+      "console: Failed to load resource: net::ERR_FAILED",
+      "console: Failed to load resource: net::ERR_FAILED",
+      "console: Failed to load resource: net::ERR_FAILED"
+    ]
+  }
+}

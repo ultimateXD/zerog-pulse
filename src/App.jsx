@@ -11,6 +11,8 @@
  * ==========================================================================*/
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { DEFAULT_KEYS, requestJSON, completionText, callPollinations, firstSuccessful, throwIfAborted } from './aiTransport';
+import { isArabic, speechLanguage, buildArabicResponse } from './clinicalArabic';
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, Legend,
 } from 'recharts';
@@ -512,16 +514,6 @@ function getOverallStatus(values) {
   return worst;
 }
 
-/* Organ status = highest triggered watch level across its linked metrics */
-function getOrganStatus(organ, values) {
-  let worst = 'NORMAL';
-  for (const w of organ.watch) {
-    const s = getMetricStatus(NASA_DATA_CONFIG.metrics[w.metric], values[w.metric]);
-    if (RANK[s] >= RANK[w.level] && RANK[w.level] > RANK[worst]) worst = w.level;
-  }
-  return worst;
-}
-
 function computeTarget(crew, scenario) {
   const target = {};
   for (const key of METRIC_ORDER) {
@@ -539,12 +531,33 @@ function fmtMET(sec) {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-const fmtVal = (v, cfg) => v.toFixed(cfg.decimals);
+const fmtVal = (v, cfg) => Number.isFinite(v) ? v.toFixed(cfg.decimals) : '—';
 
 /* ============================================================================
  * SECTION 2 — Mission Header (now with Downlink Transmit button)
  * ==========================================================================*/
 /* ===== HUD PRIMITIVES (Self-Contained — Zero Extra Imports Needed) ===== */
+/* OS-level motion preference — CSS covers declarative animation, this covers SVG SMIL. */
+function usePrefersReducedMotion() {
+  const [reduced, setReduced] = useState(() =>
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      : false
+  );
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined;
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const onChange = (e) => setReduced(e.matches);
+    if (typeof mq.addEventListener === 'function') mq.addEventListener('change', onChange);
+    else if (typeof mq.addListener === 'function') mq.addListener(onChange);
+    return () => {
+      if (typeof mq.removeEventListener === 'function') mq.removeEventListener('change', onChange);
+      else if (typeof mq.removeListener === 'function') mq.removeListener(onChange);
+    };
+  }, []);
+  return reduced;
+}
+
 const ZGP_STARS = Array.from({ length: 75 }, (_, i) => ({
   left: (i * 37 + 13) % 100,
   top: (i * 61 + 7) % 100,
@@ -596,9 +609,10 @@ const HudCorners = React.memo(function HudCorners({ tone }) {
 const OrbitalTrajectoryHUD = React.memo(function OrbitalTrajectoryHUD({ emergency }) {
   const alert = Boolean(emergency);
   const stroke = alert ? '#fb7185' : '#22d3ee';
-  const pathD = 'M 26 46 C 190 8, 410 8, 574 46';
+  const pathD = useMemo(() => 'M 26 46 C 190 8, 410 8, 574 46', []);
+  const reducedMotion = usePrefersReducedMotion();
   return (
-    <div className={'relative my-3 overflow-hidden border bg-[#060b14]/90 backdrop-blur-md ' + (alert ? 'border-rose-500/50 shadow-[0_0_25px_rgba(244,63,94,0.18)]' : 'border-cyan-500/25')}>
+    <div className={'relative my-3 overflow-hidden border bg-[#060b14]/90 ' + (alert ? 'border-rose-500/50 shadow-[0_0_25px_rgba(244,63,94,0.18)]' : 'border-cyan-500/25')}>
       <HudCorners tone={alert ? 'rose' : 'cyan'} />
       <div className="flex flex-wrap items-center gap-2 border-b border-cyan-500/15 bg-cyan-500/5 px-3 py-1.5">
         <span className={'inline-block h-2 w-2 rounded-full ' + (alert ? 'bg-rose-500 zgp-beacon' : 'bg-cyan-400')} />
@@ -616,8 +630,8 @@ const OrbitalTrajectoryHUD = React.memo(function OrbitalTrajectoryHUD({ emergenc
           <circle cx="26" cy="46" r="4" fill="#38bdf8" className="zgp-beacon" />
           <circle cx="574" cy="46" r="8" fill="#f59e0b" opacity="0.22" />
           <circle cx="574" cy="46" r="4.5" fill="#fbbf24" className="zgp-beacon" />
-          <circle r="3.8" fill={alert ? '#fb7185' : '#34d399'}>
-            <animateMotion dur="4.5s" repeatCount="indefinite" path={pathD} />
+          <circle cx={reducedMotion ? 300 : undefined} cy={reducedMotion ? 17.5 : undefined} r="3.8" fill={alert ? '#fb7185' : '#34d399'}>
+            {reducedMotion ? null : <animateMotion dur="4.5s" repeatCount="indefinite" path={pathD} />}
           </circle>
         </svg>
         <span className="absolute left-3 top-1.5 font-mono text-[10px] font-bold text-sky-300">EARTH // MCC-HOUSTON</span>
@@ -642,7 +656,7 @@ const OrbitalTrajectoryHUD = React.memo(function OrbitalTrajectoryHUD({ emergenc
 });
 const JudgeQuickGuideHUD = React.memo(function JudgeQuickGuideHUD({ onOpenData, onOpenDownlink }) {
   return (
-    <div className="relative mb-2 overflow-hidden border border-cyan-500/30 bg-[#050b16]/95 px-3 py-2 backdrop-blur-md">
+    <div className="relative mb-2 overflow-hidden border border-cyan-500/30 bg-[#050b16]/95 px-3 py-2">
       <HudCorners tone="cyan" />
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
@@ -680,7 +694,7 @@ const DualImpactAndDisclosureHUD = React.memo(function DualImpactAndDisclosureHU
   return (
     <section className="mx-auto mt-4 max-w-[1600px] px-4 pb-4">
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-        <div className="relative border border-cyan-500/25 bg-[#060b14]/90 p-3 backdrop-blur-md">
+        <div className="relative border border-cyan-500/25 bg-[#060b14]/90 p-3">
           <HudCorners tone="cyan" />
           <p className="font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-cyan-400">
             CRITERION 01 // DEEP-SPACE IMPACT
@@ -693,7 +707,7 @@ const DualImpactAndDisclosureHUD = React.memo(function DualImpactAndDisclosureHU
           </p>
         </div>
 
-        <div className="relative border border-emerald-500/25 bg-[#060b14]/90 p-3 backdrop-blur-md">
+        <div className="relative border border-emerald-500/25 bg-[#060b14]/90 p-3">
           <HudCorners tone="emerald" />
           <p className="font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-400">
             CRITERION 02 // EARTH DUAL-USE BENEFIT
@@ -706,7 +720,7 @@ const DualImpactAndDisclosureHUD = React.memo(function DualImpactAndDisclosureHU
           </p>
         </div>
 
-        <div className="relative border border-amber-500/25 bg-[#060b14]/90 p-3 backdrop-blur-md">
+        <div className="relative border border-amber-500/25 bg-[#060b14]/90 p-3">
           <HudCorners tone="amber" />
           <p className="font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-amber-400">
             NASA SPACE APPS COMPLIANCE // AI &amp; DATA DISCLOSURE
@@ -794,7 +808,7 @@ const BiomedicalDigitalTwinHUD = React.memo(function BiomedicalDigitalTwinHUD({ 
   const anyWarning = organs.some((o) => o.status === 'WARNING');
 
   return (
-    <section className={'relative flex flex-col border bg-[#060b14]/90 p-4 backdrop-blur-md ' + (anyCritical ? 'border-rose-500/50' : anyWarning ? 'border-amber-500/40' : 'border-cyan-500/25')}>
+    <section className={'relative flex flex-col border bg-[#060b14]/90 p-4 ' + (anyCritical ? 'border-rose-500/50' : anyWarning ? 'border-amber-500/40' : 'border-cyan-500/25')}>
       <HudCorners tone={anyCritical ? 'rose' : anyWarning ? 'amber' : 'cyan'} />
 
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-cyan-500/15 pb-2.5">
@@ -1450,28 +1464,22 @@ const PREDICTION_MODEL = {
   circadian: { condition: 'Orthostatic Collapse / SANS progression', riskBase: 58 },
 };
 
-let lastPredKey = null;
-let lastPredResult = null;
 function computePrediction(ctx) {
   if (!ctx || !ctx.scenario || !ctx.scenario.protocol) {
     return { scenarioId: 'nominal', condition: 'No clinical deterioration predicted', risk: 5, minutes: null, firstPending: [], pendingCount: 0, checkedCount: 0, total: 5 };
   }
-  const key = `${ctx.scenarioId}_${(ctx.checkedSteps || []).join(',')}`;
-  if (key === lastPredKey && lastPredResult) return lastPredResult;
 
   const model = PREDICTION_MODEL[ctx.scenarioId] || PREDICTION_MODEL.nominal;
   const steps = ctx.scenario.protocol.steps;
   const pendingIdx = steps.map((s, i) => i).filter((i) => !ctx.checkedSteps.includes(i));
   const risk = Math.min(97, Math.round(model.riskBase + pendingIdx.length * 2.2));
   const minutes = ctx.scenarioId === 'nominal' ? null : Math.max(8, 10 + pendingIdx.length * 3);
-  lastPredKey = key;
-  lastPredResult = {
+  return {
     scenarioId: ctx.scenarioId, condition: model.condition, risk, minutes,
     firstPending: pendingIdx.slice(0, 2).map((i) => i + 1),
     pendingCount: pendingIdx.length,
     checkedCount: ctx.checkedSteps.length, total: steps.length,
   };
-  return lastPredResult;
 }
 
 function liveReadout(ctx) {
@@ -1484,6 +1492,10 @@ function liveReadout(ctx) {
 /* Smart offline clinical reasoning — intent parsing, never generic, zero ASCII art */
 function buildAIResponse(question, ctx) {
   const pred = computePrediction(ctx);
+  if (isArabic(question)) return buildArabicResponse(question, ctx, {
+    config: NASA_DATA_CONFIG, order: METRIC_ORDER, fmtVal, getMetricStatus,
+    getOverallStatus, prediction: pred,
+  });
   const lower = question.toLowerCase().trim();
   const pending = ctx.scenario.protocol.steps
     .map((s, i) => ({ n: i + 1, text: s }))
@@ -1601,12 +1613,12 @@ function detectProviderFromKey(key) {
   return null;
 }
 
-async function callLiveAI(engine, systemPrompt, convo, userText, maxTokens) {
+async function callLiveAI(engine, systemPrompt, convo, userText, maxTokens, signal) {
   const cleanKey = String(engine.key || '').trim();
   const detected = detectProviderFromKey(cleanKey);        /* auto-detect even if the wrong tab is selected */
   const providerId = detected || String(engine.provider || '').trim();
   const route = PROVIDER_ROUTING[providerId];
-  if (!route) throw new Error('No live provider configured — use the onboard engine.');
+  if (!route || !cleanKey) throw new Error('No live provider configured — use the onboard engine.');
   const model = String(engine.model || '').trim() || route.model;
   const budget = maxTokens || 2048;
 
@@ -1616,7 +1628,7 @@ async function callLiveAI(engine, systemPrompt, convo, userText, maxTokens) {
 
   if (route.style === 'gemini') {
     const url = route.endpoint + model + ':generateContent?key=' + encodeURIComponent(cleanKey);
-    const res = await fetch(url, {
+    const data = await requestJSON(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1626,14 +1638,12 @@ async function callLiveAI(engine, systemPrompt, convo, userText, maxTokens) {
           .concat([{ role: 'user', parts: [{ text: userText }] }]),
         generationConfig: { temperature: 0.4, maxOutputTokens: budget },
       }),
-    });
-    if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + String(await res.text().catch(() => '')).slice(0, 160));
-    const data = await res.json();
-    return data.candidates[0].content.parts[0].text;
+    }, signal, 3500);
+    return completionText(data, 'gemini');
   }
 
   /* Groq / OpenRouter / Hugging Face — strict OpenAI body, ONLY these 2 headers (CORS-preflight safe) */
-  const res = await fetch(route.endpoint, {
+  const data = await requestJSON(route.endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -1647,18 +1657,17 @@ async function callLiveAI(engine, systemPrompt, convo, userText, maxTokens) {
         .concat(history)
         .concat([{ role: 'user', content: userText }]),
     }),
-  });
-  if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + String(await res.text().catch(() => '')).slice(0, 160));
-  const data = await res.json();
-  return data.choices[0].message.content;
+  }, signal, 3500);
+  return completionText(data);
 }
 
-async function testAIConnection(engine) {
+async function testAIConnection(engine, signal) {
   const t0 = Date.now();
   try {
-    await callLiveAI(engine, 'Connection test. Reply with the single word: OK', [], 'ping', 5);
+    await callLiveAI(engine, 'Connection test. Reply with the single word: OK', [], 'ping', 5, signal);
     return { state: 'ok', msg: '✅ Connected! Latency: ' + (Date.now() - t0) + ' ms' };
   } catch (err) {
+    throwIfAborted(signal);
     console.warn('[MED-AI] connection test failed:', err && err.message ? err.message : err);
     return { state: 'fail', msg: '❌ ' + String((err && err.message) || err) };
   }
@@ -1707,7 +1716,7 @@ const HF_SERVERLESS_MODELS = [
 
 const GROQ_BLOCKLIST = ['whisper', 'tts', 'playai', 'guard', 'embedding'];
 
-async function fetchAvailableModels(engine) {
+async function fetchAvailableModels(engine, signal) {
   const cleanKey = String(engine.key || '').trim();
   const providerId = detectProviderFromKey(cleanKey) || String(engine.provider || '').trim();
   const route = PROVIDER_ROUTING[providerId];
@@ -1715,28 +1724,25 @@ async function fetchAvailableModels(engine) {
   let models = [];
 
   if (providerId === 'groq') {
-    const res = await fetch('https://api.groq.com/openai/v1/models', {
+    const data = await requestJSON('https://api.groq.com/openai/v1/models', {
       headers: { 'Authorization': 'Bearer ' + cleanKey },
-    });
-    if (!res.ok) throw new Error('HTTP ' + res.status + ' — check API key');
-    const data = await res.json();
+    }, signal);
+    if (!Array.isArray(data.data)) throw new Error('Invalid model response');
     models = (data.data || []).map((item) => {
       const rawId = typeof item === 'string' ? item : String((item && (item.id || item.name)) || '').replace(/^models\//, '').trim();
       return rawId;
     }).filter((rawId) => rawId && !GROQ_BLOCKLIST.some((b) => String(rawId).toLowerCase().indexOf(b) > -1));
   } else if (providerId === 'openrouter') {
-    const res = await fetch('https://openrouter.ai/api/v1/models');
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
+    const data = await requestJSON('https://openrouter.ai/api/v1/models', {}, signal);
+    if (!Array.isArray(data.data)) throw new Error('Invalid model response');
     models = (data.data || []).map((item) => {
       const rawId = typeof item === 'string' ? item : String((item && (item.id || item.name)) || '').replace(/^models\//, '').trim();
       return rawId;
     }).filter((rawId) => rawId);
     models.sort((a, b) => (a.indexOf(':free') > -1 ? 0 : 1) - (b.indexOf(':free') > -1 ? 0 : 1));
   } else if (providerId === 'gemini') {
-    const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models?key=' + encodeURIComponent(cleanKey));
-    if (!res.ok) throw new Error('HTTP ' + res.status + ' — check API key');
-    const data = await res.json();
+    const data = await requestJSON('https://generativelanguage.googleapis.com/v1beta/models?key=' + encodeURIComponent(cleanKey), {}, signal);
+    if (!Array.isArray(data.models)) throw new Error('Invalid model response');
     models = (data.models || []).map((item) => {
       const rawId = typeof item === 'string' ? item : String((item && (item.id || item.name)) || '').replace(/^models\//, '').trim();
       return rawId;
@@ -1747,7 +1753,7 @@ async function fetchAvailableModels(engine) {
   return { provider: providerId, models: models.filter(Boolean).slice(0, 60) };
 }
 
-async function probeModel(engine, modelId) {
+async function probeModel(engine, modelId, signal) {
   const t0 = Date.now();
   const id = String(modelId || '').trim();
   if (!id) return { id: '', state: 'fail', ms: 0, msg: 'No model id' };
@@ -1758,9 +1764,10 @@ async function probeModel(engine, modelId) {
       model: id,
       provider: detectProviderFromKey(cleanKey) || engine.provider,
     };
-    await callLiveAI(trial, 'Ping.', [], 'ping', 1);
+    await callLiveAI(trial, 'Ping.', [], 'ping', 1, signal);
     return { id: id, state: 'ok', ms: Date.now() - t0, msg: '' };
   } catch (err) {
+    throwIfAborted(signal);
     const raw = String((err && err.message) || err);
     const short = raw.indexOf('HTTP 404') > -1 ? '404 Not Found'
       : raw.indexOf('HTTP 429') > -1 ? '429 Rate Limit'
@@ -1826,6 +1833,36 @@ function AISettingsModalContent({ onClose, engine, setEngine }) {
   const [modelList, setModelList] = useState([]);
   const [fetching, setFetching] = useState(false);
   const [fetchErr, setFetchErr] = useState(null);
+  const workRef = useRef(null);
+  const mountedRef = useRef(false);
+
+  const cancelWork = useCallback(() => {
+    workRef.current?.abort();
+    workRef.current = null;
+  }, []);
+  const closeModal = () => { cancelWork(); onClose(); };
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; cancelWork(); };
+  }, [cancelWork]);
+  const beginWork = () => {
+    cancelWork();
+    const controller = new AbortController();
+    workRef.current = controller;
+    setFetching(false);
+    setTest(null);
+    setModelList((list) => list.map((m) => m.state === 'probing' ? { ...m, state: 'untested' } : m));
+    return controller;
+  };
+  const validWork = (controller) => mountedRef.current && workRef.current === controller && !controller.signal.aborted;
+  const updateDraft = (next, clearModels = false) => {
+    cancelWork();
+    setDraft(next);
+    setFetching(false);
+    setTest(null);
+    setFetchErr(null);
+    setModelList((list) => clearModels ? [] : list.map((m) => m.state === 'probing' ? { ...m, state: 'untested' } : m));
+  };
 
   const active = AI_ENGINES.providers.find((p) => p.id === draft.provider);
   const keyClean = String(draft.key || '').trim();
@@ -1838,17 +1875,23 @@ function AISettingsModalContent({ onClose, engine, setEngine }) {
   };
 
   const runVerifyRow = async (id) => {
+    const controller = beginWork();
     patchRow(id, { state: 'probing' });
-    const r = await probeModel(draft, id);
-    patchRow(id, r);
+    try {
+      const r = await probeModel(draft, id, controller.signal);
+      if (validWork(controller)) patchRow(id, r);
+    } catch { /* Cancelled or superseded work must not update the draft. */ }
   };
 
   const runFetchAndVerify = async () => {
+    const controller = beginWork();
+    const draftSnapshot = draft;
     setFetching(true);
     setFetchErr(null);
     setTest(null);
     try {
-      const { models } = await fetchAvailableModels(draft);
+      const { models } = await fetchAvailableModels(draftSnapshot, controller.signal);
+      if (!validWork(controller)) return;
       if (!models.length) throw new Error('No chat-capable models returned.');
       const list = models.map((raw) => {
         const modelId = typeof raw === 'string' ? raw : String((raw && (raw.id || raw.model || raw.name)) || '');
@@ -1856,7 +1899,8 @@ function AISettingsModalContent({ onClose, engine, setEngine }) {
       }).filter((m) => m.id);
       setModelList(list);
       const candidates = list.slice(0, 6);
-      const results = await Promise.all(candidates.map((m) => probeModel(draft, m.id)));
+      const results = await Promise.all(candidates.map((m) => probeModel(draftSnapshot, m.id, controller.signal)));
+      if (!validWork(controller)) return;
       const merged = list.map((m, i) => (i < candidates.length ? Object.assign({}, m, { id: String(results[i].id || m.id), state: results[i].state, ms: results[i].ms, msg: results[i].msg }) : m));
       setModelList(merged);
       const best = merged.filter((m) => m.state === 'ok').sort((a, b) => a.ms - b.ms)[0];
@@ -1866,21 +1910,25 @@ function AISettingsModalContent({ onClose, engine, setEngine }) {
         setTest({ state: 'ok', msg: '✅ Ready to use: ' + best.id + ' (' + best.ms + ' ms)' });
       }
     } catch (err) {
+      if (!validWork(controller)) return;
       setFetchErr(String((err && err.message) || err));
       console.warn('[MED-AI] model discovery failed:', String((err && err.message) || err));
     } finally {
-      setFetching(false);
+      if (validWork(controller)) setFetching(false);
     }
   };
 
   const runTest = async () => {
+    const controller = beginWork();
     if (!currentModel) {
       setTest({ state: 'fail', msg: '❌ No model selected — verify the list and click a 🟢 WORKING model first.' });
       return;
     }
     setTest({ state: 'wait', msg: 'Testing ' + currentModel + '…' });
-    const r = await testAIConnection(Object.assign({}, draft, { model: currentModel }));
-    setTest(r);
+    try {
+      const r = await testAIConnection(Object.assign({}, draft, { model: currentModel }), controller.signal);
+      if (validWork(controller)) setTest(r);
+    } catch { /* Cancellation is not a connection failure. */ }
   };
 
   const sortedList = modelList.slice().sort((a, b) => {
@@ -1890,18 +1938,18 @@ function AISettingsModalContent({ onClose, engine, setEngine }) {
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onClick={onClose} />
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true">
+      <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onClick={closeModal} />
       <div className="relative z-10 flex max-h-[88vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-sky-500/40 bg-slate-950 shadow-[0_0_40px_rgba(56,189,248,0.25)]">
         <div className="flex items-start justify-between gap-3 border-b border-slate-800 bg-slate-900/70 p-4">
           <h2 className="font-mono text-sm font-bold text-sky-300">🔑 Configure AI Engine — MED-AI Brain</h2>
-          <button onClick={onClose} className="rounded-lg border border-slate-700 p-1.5 text-slate-400 hover:text-slate-200"><X size={16} /></button>
+          <button onClick={closeModal} className="rounded-lg border border-slate-700 p-1.5 text-slate-400 hover:text-slate-200"><X size={16} /></button>
         </div>
 
         <div className="flex-1 space-y-3 overflow-y-auto p-4">
           <div className="grid grid-cols-2 gap-2">
             {AI_ENGINES.providers.map((p) => (
-              <button type="button" key={p.id} onClick={() => { setDraft({ provider: p.id, key: '', model: p.defaultModel }); setTest(null); setModelList([]); setFetchErr(null); }}
+              <button type="button" key={p.id} onClick={() => updateDraft({ provider: p.id, key: DEFAULT_KEYS[p.id] || '', model: p.defaultModel }, true)}
                 className={'rounded-xl border p-2.5 text-left transition-all ' + (
                   draft.provider === p.id ? 'border-sky-500/70 bg-sky-500/15 text-sky-200'
                     : 'border-slate-700 bg-slate-950/70 text-slate-300 hover:border-slate-500')}>
@@ -1915,7 +1963,7 @@ function AISettingsModalContent({ onClose, engine, setEngine }) {
             <>
               <div>
                 <label className="font-mono text-xs font-bold uppercase tracking-widest text-slate-400">API Key</label>
-                <input type="password" value={draft.key} onChange={(e) => { setDraft(Object.assign({}, draft, { key: e.target.value })); setModelList([]); }}
+                <input type="password" value={draft.key} onChange={(e) => updateDraft(Object.assign({}, draft, { key: e.target.value }), true)}
                   placeholder={'Paste ' + active.label + ' API key… (' + active.keyHint + ')'}
                   className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-2 font-mono text-xs text-slate-200 placeholder-slate-600 outline-none focus:border-sky-500/60" />
               </div>
@@ -1960,7 +2008,7 @@ function AISettingsModalContent({ onClose, engine, setEngine }) {
                           onClick={() => {
                             if (m.state === 'probing' || m.state === 'fail') return;
                             if (m.state === 'untested') { runVerifyRow(modelId); return; }
-                            setDraft(Object.assign({}, draft, { model: modelId }));
+                            updateDraft(Object.assign({}, draft, { model: modelId }));
                             setTest({ state: 'ok', msg: '✅ Ready to use: ' + modelId + ' (' + m.ms + ' ms)' });
                           }}
                           className={'flex w-full items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-left transition-all ' + (
@@ -1986,7 +2034,7 @@ function AISettingsModalContent({ onClose, engine, setEngine }) {
                   </p>
                   <div>
                     <label className="font-mono text-xs font-bold uppercase tracking-widest text-slate-400">Active Model ID:</label>
-                    <input type="text" value={currentModel || ''} onChange={(e) => setDraft(Object.assign({}, draft, { model: e.target.value }))}
+                    <input type="text" value={currentModel || ''} onChange={(e) => updateDraft(Object.assign({}, draft, { model: e.target.value }))}
                       placeholder="e.g. llama-3.3-70b-versatile"
                       className="mt-1 w-full rounded-lg border border-emerald-700/60 bg-slate-950/80 px-3 py-2 font-mono text-xs font-bold text-emerald-300 placeholder-slate-600 outline-none focus:border-emerald-500/70" />
                     <p className="mt-0.5 font-mono text-[10px] text-slate-500">Click a 🟢 row to fill this automatically, or type any model id manually.</p>
@@ -2019,8 +2067,8 @@ function AISettingsModalContent({ onClose, engine, setEngine }) {
         </div>
 
         <div className="flex justify-end gap-2 border-t border-slate-800 bg-slate-900/50 p-4">
-          <button type="button" onClick={onClose} className="rounded-lg border border-slate-700 px-3 py-2 font-mono text-xs text-slate-300 hover:border-slate-500">Cancel</button>
-          <button type="button" onClick={() => { setEngine(draft); onClose(); }}
+          <button type="button" onClick={closeModal} className="rounded-lg border border-slate-700 px-3 py-2 font-mono text-xs text-slate-300 hover:border-slate-500">Cancel</button>
+          <button type="button" onClick={() => { cancelWork(); setEngine(draft); onClose(); }}
             className="rounded-lg border border-emerald-500/50 bg-emerald-500/15 px-3 py-2 font-mono text-xs font-bold text-emerald-300 hover:bg-emerald-500/25">Save Engine</button>
         </div>
       </div>
@@ -2030,14 +2078,6 @@ function AISettingsModalContent({ onClose, engine, setEngine }) {
 
 
 function AIChat({ ctx }) {
-  // Obfuscated built-in keys across all 4 providers so GitHub Secret Scanner never revokes them
-  const DEFAULT_KEYS = {
-    groq: ['gsk_', 'pLX0DH1e0SksQ26Nop6MWGdyb3FY', 'pcxdHzVjiMK4dnEa4w3DEdhD'].join(''),
-    openrouter: ['sk-or-v1-', '232361abfa4895e569f15f302ac383af', '24a3fca0c0a58d60a0f35767e657c7cf'].join(''),
-    huggingface: ['hf_', 'vCzdJcBPYbxGysDnmQFf', 'LsepfZAkzKCRwm'].join(''),
-    gemini: ['AQ.Ab8RN6JLdcV8yH9v_', 'bEvPzcUYUHwgI-vY5mrh', 'TrK-doUXuCe4g'].join(''),
-  };
-
   const [messages, setMessages] = useState([{
     role: 'ai',
     text: 'MED-AI online. Earth is ' + NASA_DATA_CONFIG.comm.label + ' away at light speed — I am your autonomous medical officer. Ask anything, or press the microphone to speak hands-free.',
@@ -2052,83 +2092,130 @@ function AIChat({ ctx }) {
       const saved = localStorage.getItem('zgp_ai_engine');
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (parsed && parsed.provider && parsed.provider !== 'onboard') {
+        if (parsed && AI_ENGINES.providers.some((p) => p.id === parsed.provider)) {
           return {
             provider: parsed.provider,
-            key: (parsed.key && String(parsed.key).trim()) || DEFAULT_KEYS[parsed.provider] || DEFAULT_KEYS.groq,
-            model: parsed.model || '',
+            key: DEFAULT_KEYS[parsed.provider] || (typeof parsed.key === 'string' ? parsed.key.trim() : ''),
+            model: typeof parsed.model === 'string' ? parsed.model.trim() : '',
           };
         }
       }
-    } catch (_err) { }
-    return { provider: 'groq', key: DEFAULT_KEYS.groq, model: 'llama-3.3-70b-versatile' };
+    } catch { /* Storage may be disabled or contain malformed data. */ }
+    const configured = ['groq', 'gemini', 'openrouter'].find((provider) => DEFAULT_KEYS[provider]);
+    return { provider: configured || 'groq', key: DEFAULT_KEYS[configured] || '', model: configured ? PROVIDER_ROUTING[configured].model : 'llama-3.3-70b-versatile' };
   });
 
   const scrollRef = useRef(null);
   const recognitionRef = useRef(null);
   const spokenRef = useRef(0);
-  const lastScenarioRef = useRef('nominal');
+  const lastScenarioRef = useRef(ctx.crew.id + ':nominal');
   const ctxRef = useRef(ctx);
   ctxRef.current = ctx;
+  const engineRef = useRef(engine);
+  engineRef.current = engine;
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const queryRef = useRef(null);
+  const autoTimerRef = useRef(null);
+  const busyRef = useRef(false);
+  const mountedRef = useRef(false);
+  const languageRef = useRef('');
+  const sendRef = useRef(null);
+  const [responseSource, setResponseSource] = useState('onboard');
+  const [responseModel, setResponseModel] = useState('');
 
-  const pred = computePrediction(ctx);
+  const cancelQuery = useCallback(() => {
+    clearTimeout(autoTimerRef.current);
+    autoTimerRef.current = null;
+    queryRef.current?.abort();
+    queryRef.current = null;
+    busyRef.current = false;
+  }, []);
+  const stopRecognition = useCallback(() => {
+    const rec = recognitionRef.current;
+    recognitionRef.current = null;
+    if (!rec) return;
+    rec.onresult = rec.onend = rec.onerror = null;
+    try { rec.abort(); } catch { /* Browser recognition may already be stopped. */ }
+  }, []);
+  const cancelSpeech = useCallback(() => {
+    try { window.speechSynthesis?.cancel(); } catch { /* Optional browser API. */ }
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      cancelQuery();
+      stopRecognition();
+      cancelSpeech();
+    };
+  }, [cancelQuery, stopRecognition, cancelSpeech]);
+
+  useEffect(() => {
+    cancelQuery();
+    stopRecognition();
+    cancelSpeech();
+    setThinking(false);
+    setListening(false);
+    return () => { cancelQuery(); stopRecognition(); cancelSpeech(); };
+  }, [ctx.crew.id, ctx.scenarioId, ctx.checkedSteps, engine, cancelQuery, stopRecognition, cancelSpeech]);
+
+  const pred = useMemo(() => computePrediction(ctx), [ctx.scenario, ctx.scenarioId, ctx.checkedSteps]);
   const activeProvider = AI_ENGINES.providers.find((p) => p.id === engine.provider) || AI_ENGINES.providers[0];
-  const modelLabel = engine.provider === 'onboard' ? '' : ' · ' + (engine.model || activeProvider.defaultModel);
+  const sourceBadge = (source) => source === 'pollinations' ? 'Pollinations Live' : (AI_ENGINES.providers.find((p) => p.id === source) || AI_ENGINES.providers.find((p) => p.id === 'onboard')).badge;
+  const modelLabel = responseModel ? ' · ' + responseModel : '';
 
   // Clean medical & markdown text and speak in sentence chunks (prevents Chrome 15s cutoff bug)
   const speakText = useCallback((rawText) => {
     if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
-    window.speechSynthesis.cancel();
-
-    const cleaned = String(rawText || '')
-      .replace(/SpO₂|SpO2/gi, 'S P O 2')
-      .replace(/ppCO₂|CO₂|CO2/gi, 'C O 2')
-      .replace(/mmHg/gi, 'millimeters of mercury')
-      .replace(/mSv\/day/gi, 'millisieverts per day')
-      .replace(/\[|\]|\/\/|[|=_\-•#*»`~>]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    if (!cleaned) return;
-
-    const voices = window.speechSynthesis.getVoices ? window.speechSynthesis.getVoices() : [];
-    const preferredVoice =
-      voices.find((v) => /en[-_](US|GB)/i.test(v.lang) && /(Google|Natural|Online|Samantha|Guy|Aria)/i.test(v.name)) ||
-      voices.find((v) => /^en/i.test(v.lang)) ||
-      null;
-
-    // Split into sentence chunks under 220 chars so browser TTS never freezes
-    const sentences = cleaned.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [cleaned];
-    sentences.slice(0, 8).forEach((sentence) => {
-      const chunk = sentence.trim();
-      if (!chunk) return;
-      const u = new SpeechSynthesisUtterance(chunk);
-      u.lang = 'en-US';
-      if (preferredVoice) u.voice = preferredVoice;
-      u.rate = 1.03;
-      u.pitch = 0.95;
-      window.speechSynthesis.speak(u);
-    });
-  }, []);
+    try {
+      window.speechSynthesis.cancel();
+      const lang = speechLanguage(languageRef.current || rawText);
+      const arabic = lang.startsWith('ar');
+      const cleaned = String(rawText || '')
+        .replace(/SpO₂|SpO2/gi, arabic ? 'تشبع الأكسجين' : 'S P O 2')
+        .replace(/ppCO₂|CO₂|CO2/gi, arabic ? 'ثاني أكسيد الكربون' : 'C O 2')
+        .replace(/mmHg/gi, arabic ? 'ملم زئبق' : 'millimeters of mercury')
+        .replace(/mSv\/day/gi, arabic ? 'مللي سيفرت يومياً' : 'millisieverts per day')
+        .replace(/\[|\]|\/\/|[|=_\-•#*»`~>]/g, ' ')
+        .replace(/\s+/g, ' ').trim();
+      if (!cleaned) return;
+      const voices = window.speechSynthesis.getVoices?.() || [];
+      const preferredVoice = voices.find((v) => v.lang.toLowerCase() === lang.toLowerCase())
+        || voices.find((v) => v.lang.toLowerCase().startsWith(arabic ? 'ar' : 'en')) || null;
+      const sentences = cleaned.match(/[^.!?؟]+[.!?؟]+|[^.!?؟]+$/g) || [cleaned];
+      const chunks = sentences.flatMap((sentence) => sentence.match(/.{1,220}(?:\s|$)|.{1,220}/gu) || []);
+      chunks.slice(0, 8).forEach((sentence) => {
+        const u = new SpeechSynthesisUtterance(sentence.trim());
+        u.lang = lang;
+        if (preferredVoice) u.voice = preferredVoice;
+        u.rate = 1.03;
+        u.pitch = 0.95;
+        u.onerror = () => { /* Unavailable voices must not disrupt telemetry. */ };
+        window.speechSynthesis.speak(u);
+      });
+    } catch { cancelSpeech(); }
+  }, [cancelSpeech]);
 
   // Preload browser voices on mount
   useEffect(() => {
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window && window.speechSynthesis.getVoices) {
-      window.speechSynthesis.getVoices();
-    }
+    try {
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window && window.speechSynthesis.getVoices) {
+        window.speechSynthesis.getVoices();
+      }
+    } catch { /* Optional browser API — a defined-but-broken speech engine must not break the app. */ }
   }, []);
 
-  // Auto-fill built-in key if user switches provider inside Configure AI Engine modal
+  // Browser storage is optional. Never persist environment-provided keys.
   useEffect(() => {
-    if (engine.provider !== 'onboard' && (!engine.key || !String(engine.key).trim()) && DEFAULT_KEYS[engine.provider]) {
-      setEngine((prev) => ({ ...prev, key: DEFAULT_KEYS[prev.provider] }));
-      return;
-    }
-    try { localStorage.setItem('zgp_ai_engine', JSON.stringify(engine)); } catch (_err) { }
+    try {
+      localStorage.setItem('zgp_ai_engine', JSON.stringify({ ...engine, key: engine.key === DEFAULT_KEYS[engine.provider] ? '' : engine.key }));
+    } catch { /* Browser storage is optional. */ }
   }, [engine]);
 
   useEffect(() => {
-    scrollRef.current && scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+    try { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' }); } catch { /* Reduced browser implementations. */ }
   }, [messages, thinking]);
 
   // Speak new AI messages aloud when Voice Output is ON
@@ -2141,10 +2228,29 @@ function AIChat({ ctx }) {
     }
   }, [messages, voiceOn, speakText]);
 
-  // Multi-Provider Failover Chain: Selected Engine -> Groq -> OpenRouter -> HuggingFace -> Gemini -> Onboard NASA Engine
+  // Configured providers (one 3.5 s window) -> Pollinations (6 s) -> onboard.
   const runAutonomousOrLiveQuery = useCallback((promptText, historySnapshot, currentCtx, onDone) => {
-    if (engine.provider === 'onboard') {
-      setTimeout(() => onDone(buildAIResponse(promptText, currentCtx)), 450);
+    cancelQuery();
+    const controller = new AbortController();
+    queryRef.current = controller;
+    busyRef.current = true;
+    const valid = () => mountedRef.current && !controller.signal.aborted
+      && queryRef.current === controller && engineRef.current === engine
+      && ctxRef.current.crew.id === currentCtx.crew.id
+      && ctxRef.current.scenarioId === currentCtx.scenarioId
+      && ctxRef.current.checkedSteps === currentCtx.checkedSteps;
+    const finish = (reply, source, model = '') => {
+      if (!valid()) return;
+      queryRef.current = null;
+      busyRef.current = false;
+      setResponseSource(source);
+      setResponseModel(model);
+      onDone(reply, source);
+      controller.abort();
+    };
+    const offline = () => finish(buildAIResponse(promptText, currentCtx), 'onboard');
+    if (engine.provider === 'onboard' || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+      offline();
       return;
     }
 
@@ -2157,73 +2263,61 @@ function AIChat({ ctx }) {
       '4. CSA Monitoring Radiation (https://www.asc-csa.gc.ca/eng/news/articles/2026/2026-02-26-monitoring-radiation-astronaut-health.asp): Canadian Active Neutron Spectrometer (CANS) and Bubble Detector real-time mSv/day dosimetry.\n' +
       '5. CSA Space Science & Earth Dual-Use (https://www.asc-csa.gc.ca/eng/iss/science/why-do-we-conduct-science-experiments-in-space.asp): CSA Bio-Monitor Smart Shirt + AI platform and CARDIOBREATH cardiovascular/respiratory tracking for astronauts and remote Earth patients.\n' +
       'LANGUAGE & COMPLETION RULE: Always reply in the EXACT SAME LANGUAGE used by the user (Arabic if Arabic, English if English). Cite relevant NASA HRP, CSA, and NASA-STD-3001 standards naturally and finish all sentences completely.';
-    const primaryKey = (engine.key && String(engine.key).trim()) || DEFAULT_KEYS[engine.provider] || DEFAULT_KEYS.groq;
+    const primaryKey = DEFAULT_KEYS[engine.provider] || String(engine.key || '').trim();
     const primaryProvider = detectProviderFromKey(primaryKey) || engine.provider || 'groq';
 
     const candidates = [
-      { provider: primaryProvider, key: primaryKey, model: engine.model || 'llama-3.3-70b-versatile' },
-      { provider: 'groq', key: DEFAULT_KEYS.groq, model: 'llama-3.3-70b-versatile' },
+      { provider: primaryProvider, key: primaryKey, model: engine.model || '' },
+      { provider: 'groq', key: DEFAULT_KEYS.groq, model: '' },
       { provider: 'openrouter', key: DEFAULT_KEYS.openrouter, model: '' },
-      { provider: 'huggingface', key: DEFAULT_KEYS.huggingface, model: '' },
       { provider: 'gemini', key: DEFAULT_KEYS.gemini, model: '' },
     ].filter((c, idx, arr) => c.key && arr.findIndex((x) => x.provider === c.provider && x.key === c.key) === idx);
 
-    let settled = false;
-    const giveUp = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      onDone(buildAIResponse(promptText, currentCtx));
-    }, 28000);
-
-    const tryCandidate = (index) => {
-      if (settled) return;
-      if (index >= candidates.length) {
-        settled = true;
-        clearTimeout(giveUp);
-        onDone(buildAIResponse(promptText, currentCtx));
+    void (async () => {
+      try {
+        const result = await firstSuccessful(candidates, async (candidate, signal) => ({
+          reply: await callLiveAI(candidate, sys, historySnapshot, promptText, undefined, signal),
+          source: candidate.provider,
+          model: candidate.model || PROVIDER_ROUTING[candidate.provider]?.model || '',
+        }), controller.signal);
+        finish(result.reply, result.source, result.model);
         return;
+      } catch {
+        if (!valid()) return;
       }
-      callLiveAI(candidates[index], sys, historySnapshot, promptText)
-        .then((reply) => {
-          if (!settled && reply && String(reply).trim()) {
-            settled = true;
-            clearTimeout(giveUp);
-            onDone(reply);
-          } else if (!settled) {
-            tryCandidate(index + 1);
-          }
-        })
-        .catch(() => {
-          if (!settled) tryCandidate(index + 1);
-        });
-    };
-
-    tryCandidate(0);
-  }, [engine]);
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) { offline(); return; }
+      try {
+        const reply = await callPollinations(sys, historySnapshot, promptText, controller.signal);
+        finish(reply, 'pollinations', 'openai');
+      } catch {
+        if (valid()) offline();
+      }
+    })();
+  }, [engine, cancelQuery]);
 
   // Autonomous Emergency Trigger: Fires automatically whenever a space emergency button is clicked
-  const scenObj = ctx && (ctx.scenario || ctx.activeScenario || ctx.currentScenario);
-  const currentScenarioId =
-    (typeof scenObj === 'string' ? scenObj : (scenObj && (scenObj.id || scenObj.key || scenObj.name || scenObj.title))) ||
-    (ctx && (ctx.scenarioId || ctx.activeScenarioId || ctx.mode)) ||
-    'nominal';
+  const currentScenarioId = ctx.scenarioId;
 
   useEffect(() => {
-    if (currentScenarioId === lastScenarioRef.current) return;
-    lastScenarioRef.current = currentScenarioId;
+    const contextKey = ctx.crew.id + ':' + currentScenarioId;
+    if (contextKey === lastScenarioRef.current) return;
+    lastScenarioRef.current = contextKey;
 
     const latestCtx = ctxRef.current;
     const sObj = latestCtx && (latestCtx.scenario || latestCtx.activeScenario);
     const scenTitle = (sObj && (sObj.name || sObj.title || sObj.label)) || currentScenarioId;
 
-    if (String(currentScenarioId).toLowerCase().includes('nominal')) {
+    if (currentScenarioId === 'nominal') {
       setMessages((m) => [
         ...m,
         {
           role: 'ai',
+          source: 'onboard',
           text: '**[AUTONOMOUS STATUS // NOMINAL RESTORED]** All crew vitals and cabin environmental parameters have stabilized within NASA-STD-3001 flight-rule limits. Resuming passive biometric watch.',
         },
       ]);
+      setResponseSource('onboard');
+      setResponseModel('');
       setThinking(false);
       return;
     }
@@ -2241,39 +2335,47 @@ function AIChat({ ctx }) {
       },
     ]);
     setThinking(true);
+    busyRef.current = true;
 
-    const timer = setTimeout(() => {
+    autoTimerRef.current = setTimeout(() => {
+      autoTimerRef.current = null;
       const freshCtx = ctxRef.current;
-      runAutonomousOrLiveQuery(autoPrompt, [], freshCtx, (reply) => {
-        setMessages((m) => [...m, { role: 'ai', text: reply }]);
+      if (!mountedRef.current || freshCtx.crew.id !== latestCtx.crew.id || freshCtx.scenarioId !== currentScenarioId) return;
+      runAutonomousOrLiveQuery(autoPrompt, [], freshCtx, (reply, source) => {
+        setMessages((m) => [...m, { role: 'ai', text: reply, source }]);
         setThinking(false);
       });
     }, 1400);
 
-    return () => clearTimeout(timer);
-  }, [currentScenarioId, runAutonomousOrLiveQuery]);
+    return cancelQuery;
+  }, [ctx.crew.id, currentScenarioId, runAutonomousOrLiveQuery, cancelQuery]);
 
   const send = useCallback((text) => {
     const q = String(text || '').trim();
-    if (!q || thinking) return;
-    const snapshot = messages;
+    if (!q || busyRef.current || !mountedRef.current) return;
+    const snapshot = messagesRef.current;
+    languageRef.current = q;
+    stopRecognition();
+    setListening(false);
     setMessages((m) => [...m, { role: 'user', text: q }]);
     setInput('');
     setThinking(true);
 
-    runAutonomousOrLiveQuery(q, snapshot, ctx, (reply) => {
-      setMessages((m) => [...m, { role: 'ai', text: reply }]);
+    runAutonomousOrLiveQuery(q, snapshot, ctxRef.current, (reply, source) => {
+      setMessages((m) => [...m, { role: 'ai', text: reply, source }]);
       setThinking(false);
     });
-  }, [ctx, thinking, messages, runAutonomousOrLiveQuery]);
+  }, [runAutonomousOrLiveQuery, stopRecognition]);
+  sendRef.current = send;
 
   // Improved Microphone Input: Live transcript preview + auto-send when finished speaking
   const startVoice = () => {
-    if (listening) {
-      try { recognitionRef.current && recognitionRef.current.stop(); } catch (_err) { }
+    if (recognitionRef.current) {
+      stopRecognition();
       setListening(false);
       return;
     }
+    if (busyRef.current) return;
     const SpeechRec = typeof SR !== 'undefined' && SR
       ? SR
       : (typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition));
@@ -2284,12 +2386,11 @@ function AIChat({ ctx }) {
     }
 
     // Silence any ongoing AI speech so the mic doesn't record the speaker
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
-    }
+    cancelSpeech();
 
-    const rec = new SpeechRec();
-    rec.lang = 'en-US';
+    let rec;
+    try { rec = new SpeechRec(); } catch { setListening(false); return; }
+    rec.lang = speechLanguage(input.trim() || languageRef.current);
     rec.continuous = false;
     rec.interimResults = true;
     rec.maxAlternatives = 1;
@@ -2297,6 +2398,7 @@ function AIChat({ ctx }) {
     let finalTranscript = '';
 
     rec.onresult = (e) => {
+      if (!mountedRef.current || recognitionRef.current !== rec) return;
       let interim = '';
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const piece = e.results[i][0].transcript;
@@ -2310,13 +2412,18 @@ function AIChat({ ctx }) {
     };
 
     rec.onend = () => {
+      if (!mountedRef.current || recognitionRef.current !== rec) return;
+      recognitionRef.current = null;
+      rec.onresult = rec.onend = rec.onerror = null;
       setListening(false);
       if (finalTranscript.trim()) {
-        send(finalTranscript.trim());
+        sendRef.current?.(finalTranscript.trim());
       }
     };
 
     rec.onerror = (e) => {
+      if (!mountedRef.current || recognitionRef.current !== rec) return;
+      stopRecognition();
       setListening(false);
       if (e && (e.error === 'not-allowed' || e.error === 'service-not-allowed')) {
         setMessages((m) => [...m, { role: 'ai', text: 'Microphone access was blocked by the browser. Click the lock/tune icon next to the URL bar and allow Microphone access.' }]);
@@ -2325,7 +2432,7 @@ function AIChat({ ctx }) {
 
     recognitionRef.current = rec;
     setListening(true);
-    try { rec.start(); } catch (_err) { setListening(false); }
+    try { rec.start(); } catch { stopRecognition(); setListening(false); }
   };
 
   // Improved Speaker Toggle: Immediately reads the latest AI response when switched ON
@@ -2333,7 +2440,7 @@ function AIChat({ ctx }) {
     const next = !voiceOn;
     setVoiceOn(next);
     if (!next) {
-      if (typeof window !== 'undefined' && 'speechSynthesis' in window) window.speechSynthesis.cancel();
+      cancelSpeech();
     } else {
       const lastAi = [...messages].reverse().find((m) => m.role === 'ai');
       spokenRef.current = messages.length - 1;
@@ -2348,7 +2455,7 @@ function AIChat({ ctx }) {
           <Bot size={15} className="text-sky-400" /> {NASA_DATA_CONFIG.ai.officerName}
         </h2>
         <span className="rounded-full border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 font-mono text-xs font-bold text-sky-300">
-          {activeProvider.badge}{modelLabel}
+          {sourceBadge(responseSource)}{modelLabel}
         </span>
         <button onClick={() => setSettingsOpen(true)}
           className="ml-auto flex items-center gap-1.5 rounded-lg border border-slate-600 bg-slate-800/60 px-2.5 py-1.5 font-mono text-xs font-bold text-slate-200 transition-all hover:border-sky-500/50 hover:text-sky-300">
@@ -2364,10 +2471,10 @@ function AIChat({ ctx }) {
             msg.role === 'ai' ? 'border-sky-500/30 bg-sky-500/5 text-slate-200' : 'ml-auto border-rose-500/40 bg-rose-950/30 text-rose-200')}>
             {msg.role === 'ai' && (
               <p className="mb-1 flex items-center gap-1 font-mono text-xs font-bold tracking-widest text-sky-400">
-                <Sparkles size={11} /> MED-AI {activeProvider.badge}
+                <Sparkles size={11} /> MED-AI {sourceBadge(msg.source || 'onboard')}
               </p>
             )}
-            <div className="space-y-0.5 text-sm leading-relaxed text-slate-200">{renderFormattedChat(msg.text)}</div>
+            <div dir={isArabic(msg.text) ? 'rtl' : 'ltr'} className="space-y-0.5 text-sm leading-relaxed text-slate-200">{renderFormattedChat(msg.text)}</div>
           </div>
         ))}
         {thinking && (
@@ -2388,8 +2495,8 @@ function AIChat({ ctx }) {
       </div>
 
       <form onSubmit={(e) => { e.preventDefault(); send(input); }} className="mt-2 flex gap-2">
-        <input value={input} onChange={(e) => setInput(e.target.value)}
-          placeholder={listening ? 'Listening... speak now in English' : 'Ask MED-AI about crew health…'}
+        <input value={input} onChange={(e) => { setInput(e.target.value); if (e.target.value.trim()) languageRef.current = e.target.value; }}
+          placeholder={listening ? (speechLanguage(input.trim() || languageRef.current).startsWith('ar') ? 'جارٍ الاستماع... تحدث الآن بالعربية' : 'Listening... speak now in English') : 'Ask MED-AI about crew health…'}
           className="flex-1 rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-2 font-mono text-sm text-slate-200 placeholder-slate-600 outline-none focus:border-sky-500/60" />
         <button type="button" onClick={startVoice} title="Voice input"
           className={'flex items-center gap-1.5 rounded-lg border px-2.5 py-2 font-mono text-xs font-bold transition-all ' + (
@@ -2492,24 +2599,58 @@ const DownlinkModal = React.memo(function DownlinkModal({ open, onClose, packet 
 });
 
 function DownlinkModalContent({ onClose, packet }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
   const [copied, setCopied] = useState(false);
   const [uplink, setUplink] = useState({ phase: 'idle', progress: 0, stageIdx: 0 });
   const uplinkRef = useRef(null);
+  const copyTimerRef = useRef(null);
+  const mountedRef = useRef(false);
+  const copyGenerationRef = useRef(0);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      copyGenerationRef.current += 1;
+      clearInterval(uplinkRef.current);
+      clearTimeout(copyTimerRef.current);
+    };
+  }, []);
 
   const overall = packet.overallStatus;
   const os = STATUS_STYLE[overall === 'NOMINAL' ? 'NORMAL' : overall];
 
   const copyJSON = async () => {
+    const generation = ++copyGenerationRef.current;
     const text = JSON.stringify(packet, null, 2);
+    let success = false;
     try {
       await navigator.clipboard.writeText(text);
+      success = true;
     } catch {
-      const ta = document.createElement('textarea');
-      ta.value = text; document.body.appendChild(ta);
-      ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+      if (!mountedRef.current || generation !== copyGenerationRef.current) return;
+      let ta;
+      try {
+        ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        success = document.execCommand('copy');
+      } catch { /* Clipboard permissions may be denied. */ }
+      finally { ta?.remove(); }
     }
+    if (!success || !mountedRef.current || generation !== copyGenerationRef.current) return;
+    clearTimeout(copyTimerRef.current);
     setCopied(true);
-    setTimeout(() => setCopied(false), 2200);
+    copyTimerRef.current = setTimeout(() => {
+      if (mountedRef.current && generation === copyGenerationRef.current) setCopied(false);
+    }, 2200);
   };
 
   const printReport = () => {
@@ -2570,36 +2711,40 @@ function DownlinkModalContent({ onClose, packet }) {
       + '</div>'
       + '<small style="display:block;margin-top:14px;">Earth MCC response ETA ~29 min (round-trip light time). This document was produced without human review per autonomous operations doctrine NASA-STD-3001 / HRP Standard Measures.</small>'
       + '</body></html>';
-    const w = window.open('', '_blank', 'width=860,height=960');
-    w.document.write(html);
-    w.document.close();
-    w.focus();
-    w.print();
+    try {
+      const w = window.open('', '_blank', 'width=860,height=960');
+      if (!w) return;
+      w.opener = null;
+      w.document.write(html);
+      w.document.close();
+      w.focus();
+      w.print();
+    } catch { /* A blocked popup or unavailable printer must not crash the app. */ }
   };
 
 
   const startUplink = () => {
-    if (uplink.phase === 'transmitting') return;
+    if (uplink.phase !== 'idle' || uplinkRef.current) return;
     clearInterval(uplinkRef.current);
     setUplink({ phase: 'transmitting', progress: 0, stageIdx: 0 });
+    let progress = 0;
     uplinkRef.current = setInterval(() => {
-      setUplink((u) => {
-        const progress = Math.min(100, u.progress + 4);
-        const stageIdx = Math.min(
-          NASA_DATA_CONFIG.downlink.dsn.uplinkStages.length - 1,
-          Math.floor(progress / (100 / NASA_DATA_CONFIG.downlink.dsn.uplinkStages.length))
-        );
-        if (progress >= 100) {
-          clearInterval(uplinkRef.current);
-          return { phase: 'queued', progress: 100, stageIdx };
-        }
-        return { phase: 'transmitting', progress, stageIdx };
-      });
+      if (!mountedRef.current) return;
+      progress = Math.min(100, progress + 4);
+      const stageIdx = Math.min(
+        NASA_DATA_CONFIG.downlink.dsn.uplinkStages.length - 1,
+        Math.floor(progress / (100 / NASA_DATA_CONFIG.downlink.dsn.uplinkStages.length))
+      );
+      if (progress >= 100) {
+        clearInterval(uplinkRef.current);
+        uplinkRef.current = null;
+      }
+      setUplink({ phase: progress >= 100 ? 'queued' : 'transmitting', progress, stageIdx });
     }, 110);
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true">
       <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onClick={onClose} />
       <div className="relative z-10 flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-sky-500/40 bg-slate-950 shadow-[0_0_40px_rgba(56,189,248,0.25)]">
         {/* header */}
@@ -2734,9 +2879,15 @@ function DownlinkModalContent({ onClose, packet }) {
  * SECTION 8 — UPGRADE 3: NASA Open Data & Standards Modal
  * ==========================================================================*/
 const NASADataModal = React.memo(function NASADataModal({ open, onClose }) {
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true">
       <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onClick={onClose} />
       <div className="relative z-10 flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-emerald-500/40 bg-slate-950 shadow-[0_0_40px_rgba(16,185,129,0.2)]">
         <div className="flex items-start justify-between gap-3 border-b border-slate-800 bg-slate-900/70 p-4">
@@ -2798,17 +2949,39 @@ const MissionFooter = React.memo(function MissionFooter({ onOpenData }) {
 /* ============================================================================
  * SECTION 9 — Root App Component (wiring + telemetry engine)
  * ==========================================================================*/
+function seedHistory(crew, met) {
+  return Array.from({ length: 10 }, (_, i) => {
+    const vals = {};
+    METRIC_ORDER.forEach((key) => {
+      vals[key] = crew.baselines[key] + (Math.random() - 0.5) * 2 * NASA_DATA_CONFIG.metrics[key].jitter;
+    });
+    return { met: fmtMET(met - (9 - i) * TICK_MS / 1000), ...vals };
+  });
+}
+
 export default function App() {
   const [crewId, setCrewId] = useState(NASA_DATA_CONFIG.crews[0].id);
   const [scenarioId, setScenarioId] = useState('nominal');
-  const [history, setHistory] = useState([]);
+  const [history, setHistory] = useState(() => seedHistory(NASA_DATA_CONFIG.crews[0], 15600));
   const [checkedSteps, setCheckedSteps] = useState([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [downlinkOpen, setDownlinkOpen] = useState(false);
 
   /* Memoized root event handlers to prevent child re-renders */
-  const handleCrewChange = useCallback((id) => setCrewId(id), []);
-  const handleScenarioChange = useCallback((id) => setScenarioId(id), []);
+  const handleCrewChange = useCallback((id) => {
+    if (id === crewId) return;
+    const nextCrew = NASA_DATA_CONFIG.crews.find((c) => c.id === id);
+    if (!nextCrew) return;
+    valuesRef.current = nextCrew.baselines;
+    setCrewId(id);
+    setHistory(seedHistory(nextCrew, metRef.current));
+    setCheckedSteps([]);
+  }, [crewId]);
+  const handleScenarioChange = useCallback((id) => {
+    if (id === scenarioId || !NASA_DATA_CONFIG.scenarios[id]) return;
+    setScenarioId(id);
+    setCheckedSteps([]);
+  }, [scenarioId]);
   const handleOpenDownlink = useCallback(() => setDownlinkOpen(true), []);
   const handleCloseDownlink = useCallback(() => setDownlinkOpen(false), []);
   const handleOpenData = useCallback(() => setDrawerOpen(true), []);
@@ -2819,28 +2992,6 @@ export default function App() {
 
   const crew = NASA_DATA_CONFIG.crews.find((c) => c.id === crewId);
   const scenario = NASA_DATA_CONFIG.scenarios[scenarioId];
-
-  const snapshot = useCallback((vals) => {
-    metRef.current += TICK_MS / 1000;
-    return { met: fmtMET(metRef.current), ...vals };
-  }, []);
-
-  /* Seed history on mount & crew switch */
-  useEffect(() => {
-    valuesRef.current = { ...crew.baselines };
-    const seed = [];
-    for (let i = 0; i < 10; i++) {
-      const vals = {};
-      METRIC_ORDER.forEach((k) => {
-        vals[k] = crew.baselines[k] + (Math.random() - 0.5) * 2 * NASA_DATA_CONFIG.metrics[k].jitter;
-      });
-      seed.push(snapshot(vals));
-    }
-    setHistory(seed);
-    setCheckedSteps([]);
-  }, [crewId, crew, snapshot]);
-
-  useEffect(() => { setCheckedSteps([]); }, [scenarioId]);
 
   /* Telemetry engine: 1.5 s cadence */
   useEffect(() => {
@@ -2855,16 +3006,15 @@ export default function App() {
         next[k] = cur + drift + jitter;
       });
       valuesRef.current = next;
-      setHistory((h) => {
-        const nh = [...h, snapshot(next)];
-        if (nh.length > HISTORY_LEN) nh.shift();
-        return nh;
-      });
+      // Increment once per real interval, never inside a replayable state updater.
+      metRef.current += TICK_MS / 1000;
+      const point = { met: fmtMET(metRef.current), ...next };
+      setHistory((h) => [...h, point].slice(-HISTORY_LEN));
     }, TICK_MS);
     return () => clearInterval(id);
-  }, [crew, scenarioId, snapshot]);
+  }, [crew, scenarioId]);
 
-  const values = history.length ? { ...history[history.length - 1] } : { ...crew.baselines };
+  const values = useMemo(() => history.length ? history[history.length - 1] : crew.baselines, [history, crew]);
   const overall = getOverallStatus(values);
   const prevValues = history.length > 1 ? history[history.length - 2] : values;
 
@@ -2926,4 +3076,3 @@ export default function App() {
     </div>
   );
 }
-

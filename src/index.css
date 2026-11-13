@@ -60,8 +60,7 @@ div.border.rounded-xl,
 article.border,
 button.text-left {
     border-radius: 2px !important;
-    background: linear-gradient(180deg, rgba(8, 15, 28, 0.92) 0%, rgba(4, 9, 18, 0.96) 100%) !important;
-    backdrop-filter: blur(12px);
+    background: linear-gradient(180deg, rgba(8, 15, 28, 0.72) 0%, rgba(4, 9, 18, 0.82) 100%) !important;
     box-shadow: inset 0 1px 0 0 rgba(34, 211, 238, 0.25), 0 6px 24px rgba(0, 0, 0, 0.5);
     position: relative;
 }
@@ -74,7 +73,7 @@ button.text-left {
 
 button.text-left:hover {
     border-color: rgba(34, 211, 238, 0.65) !important;
-    background: linear-gradient(180deg, rgba(12, 24, 44, 0.95) 0%, rgba(6, 13, 26, 0.98) 100%) !important;
+    background: linear-gradient(180deg, rgba(12, 24, 44, 0.80) 0%, rgba(6, 13, 26, 0.88) 100%) !important;
 }
 
 /* الزوايا التكتيكية المضيئة (أعلى اليسار وأسفل اليمين) لكل اللوحات وأزرار الطوارئ */
@@ -118,32 +117,117 @@ button.text-left div {
     border-radius: 2px !important;
 }
 
-/* تحجيم الرسم البياني المصغر (Sparkline) داخل كروت المؤشرات ليبقى داخل الإطار دائماً */
-main section.grid>* svg:not([width="12"]):not([width="14"]):not([width="16"]):not([width="18"]) {
+/* Only Recharts sparklines inside the metric-card strip are capped, not icons. */
+main > section.grid > div .h-10.w-24 .recharts-surface {
     max-width: 64px !important;
     flex-shrink: 1 !important;
 }
 
-/* Keep deep-space stars & nebula visible on small laptop screens */
-body::after {
-    content: "";
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
-    z-index: 5;
-    background-image:
-        radial-gradient(1.5px 1.5px at 12% 18%, rgba(255, 255, 255, 0.85) 50%, transparent 100%),
-        radial-gradient(1px 1px at 28% 62%, rgba(125, 211, 252, 0.8) 50%, transparent 100%),
-        radial-gradient(1.5px 1.5px at 45% 25%, rgba(255, 255, 255, 0.75) 50%, transparent 100%),
-        radial-gradient(1px 1px at 64% 82%, rgba(167, 243, 208, 0.7) 50%, transparent 100%),
-        radial-gradient(1.5px 1.5px at 78% 14%, rgba(255, 255, 255, 0.85) 50%, transparent 100%),
-        radial-gradient(1px 1px at 88% 54%, rgba(125, 211, 252, 0.8) 50%, transparent 100%),
-        radial-gradient(1.5px 1.5px at 19% 88%, rgba(255, 255, 255, 0.7) 50%, transparent 100%),
-        radial-gradient(1px 1px at 53% 48%, rgba(196, 181, 253, 0.75) 50%, transparent 100%),
-        radial-gradient(1.5px 1.5px at 92% 86%, rgba(255, 255, 255, 0.8) 50%, transparent 100%),
-        radial-gradient(600px circle at 15% 20%, rgba(14, 165, 233, 0.07), transparent 70%),
-        radial-gradient(500px circle at 85% 75%, rgba(99, 102, 241, 0.07), transparent 70%);
-    background-size: 320px 320px, 280px 280px, 360px 360px, 250px 250px, 400px 400px, 300px 300px, 340px 340px, 260px 260px, 380px 380px, 100% 100%, 100% 100%;
-    mix-blend-mode: screen;
-    opacity: 0.75;
+/* Correct intrinsic flex/grid sizing instead of concealing horizontal overflow. */
+#root :where(header, main, footer, section, .fixed) {
+    overflow-wrap: anywhere;
+}
+
+#root :where(header, main, footer, section, .fixed) :where(.flex, .grid) > :where(div, section, article, p, h1, h2, h3, span, a, button, input) {
+    min-width: 0;
+}
+
+#root :where(header, main, footer, section, .fixed) :where(button, a.border, span.border) {
+    max-width: 100%;
+}
+
+/* Preserve the specified Lucide dimensions while adjacent text wraps. */
+#root .flex > svg.lucide,
+#root header .h-11.w-11 {
+    flex-shrink: 0;
+}
+
+/* Preserve the original 96px box where it fits; permit shrinking/wrapping instead. */
+main > section.grid > div .h-10.w-24 {
+    flex: 0 1 96px;
+    min-width: 0;
+    max-width: 96px;
+}
+
+main > section.grid > div .mt-auto > .flex.items-end,
+main > section.grid > div .flex.items-baseline {
+    flex-wrap: wrap;
+}
+
+main > section.grid > div .flex.items-baseline > .tabular-nums {
+    white-space: nowrap;
+}
+
+/* Text-heavy status/module rows may wrap only when they cannot fit. */
+main section > .flex.justify-between,
+main section .space-y-2 > div.border > .flex.justify-between,
+main section .space-y-2 > div.border > .mt-1.flex.justify-between,
+main section form + div > .flex.justify-between,
+#root .fixed h2.flex,
+#root .fixed .overflow-y-auto > .flex.items-center,
+#root .fixed .overflow-y-auto .px-3.py-1\.5.flex {
+    flex-wrap: wrap;
+}
+
+/* Keep the chat input usable at phone widths; all original controls stay visible. */
+@media (max-width: 639px) {
+    main section > form.flex {
+        flex-wrap: wrap;
+    }
+
+    main section > form.flex > input {
+        flex-basis: 100%;
+    }
+
+    /* Three absolutely positioned orbital labels overlap on narrow phones. */
+    #root div.mx-auto > div.my-3 > div.relative.px-2.py-1 {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 4px 8px;
+    }
+
+    #root div.mx-auto > div.my-3 > div.relative.px-2.py-1 > span {
+        position: static;
+        min-width: 0;
+        transform: none;
+    }
+
+    #root div.mx-auto > div.my-3 > div.relative.px-2.py-1 > span.left-3 {
+        order: 0;
+    }
+
+    #root div.mx-auto > div.my-3 > div.relative.px-2.py-1 > span.right-3 {
+        order: 0;
+        text-align: right;
+    }
+
+    #root div.mx-auto > div.my-3 > div.relative.px-2.py-1 > span.left-1\/2 {
+        order: 1;
+        grid-column: 1 / -1;
+        text-align: center;
+    }
+
+    #root div.mx-auto > div.my-3 > div.relative.px-2.py-1 > svg {
+        order: 2;
+        grid-column: 1 / -1;
+    }
+
+    #root div.mx-auto > div.my-3 > div.relative.px-2.py-1 > span.bottom-1 {
+        order: 3;
+    }
+}
+
+/* Normal-mode timings remain unchanged; OS reduced-motion disables CSS motion. */
+@media (prefers-reduced-motion: reduce) {
+    #root *,
+    #root *::before,
+    #root *::after {
+        animation: none !important;
+        transition: none !important;
+        scroll-behavior: auto !important;
+    }
+
+    .zgp-star {
+        opacity: 0.5;
+    }
 }

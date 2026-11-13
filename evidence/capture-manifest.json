@@ -1,0 +1,59 @@
+{
+  "url": "http://localhost:3100/",
+  "viewport": [
+    1440,
+    900
+  ],
+  "shots": [
+    {
+      "file": "/home/ubuntu/zerog-pulse-delivery/screenshots/01_nominal_hud_1440x900.png",
+      "name": "01_nominal_hud_1440x900.png",
+      "description": "Nominal orbit: header, DSN trajectory HUD, simulator strip and six vitals cards."
+    },
+    {
+      "file": "/home/ubuntu/zerog-pulse-delivery/screenshots/02_spe_predictor_medai_1440x900.png",
+      "name": "02_spe_predictor_medai_1440x900.png",
+      "description": "Solar Particle Event: predictive risk banner and MED-AI autonomous reply."
+    },
+    {
+      "file": "/home/ubuntu/zerog-pulse-delivery/screenshots/03_organ_matrix_1440x900.png",
+      "name": "03_organ_matrix_1440x900.png",
+      "description": "Five-organ digital twin matrix with the organ pathophysiology telemetry tab."
+    },
+    {
+      "file": "/home/ubuntu/zerog-pulse-delivery/screenshots/04a_official_resources_1440x900.png",
+      "name": "04a_official_resources_1440x900.png",
+      "description": "Official NASA HRP, CSA and OSDR challenge resources modal."
+    },
+    {
+      "file": "/home/ubuntu/zerog-pulse-delivery/screenshots/04b_downlink_packet_1440x900.png",
+      "name": "04b_downlink_packet_1440x900.png",
+      "description": "Simulated Earth downlink packet modal with the generated JSON report."
+    },
+    {
+      "file": "/home/ubuntu/zerog-pulse-delivery/screenshots/05_mobile_375x812.png",
+      "name": "05_mobile_375x812.png",
+      "description": "Mobile 375x812 top of page."
+    },
+    {
+      "file": "/home/ubuntu/zerog-pulse-delivery/screenshots/06_tablet_768x1024.png",
+      "name": "06_tablet_768x1024.png",
+      "description": "Tablet 768x1024 top of page."
+    },
+    {
+      "file": "/home/ubuntu/zerog-pulse-delivery/screenshots/07_laptop_1366x768.png",
+      "name": "07_laptop_1366x768.png",
+      "description": "Small laptop 1366x768 top of page."
+    },
+    {
+      "file": "/home/ubuntu/zerog-pulse-delivery/screenshots/08_desktop_1920x1080.png",
+      "name": "08_desktop_1920x1080.png",
+      "description": "Desktop 1920x1080 top of page."
+    }
+  ],
+  "ai_reply_wait_s": 0.08,
+  "console_errors": [
+    "console: Failed to load resource: the server responded with a status of 403 ()",
+    "console: Failed to load resource: the server responded with a status of 403 ()"
+  ]
+}

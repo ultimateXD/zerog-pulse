@@ -40,3 +40,52 @@ During deep-space Artemis and Mars transit missions, one-way light-speed communi
 ```bash
 npm install
 npm run dev
+
+---
+## Run, configure and deploy this repaired build
+
+This repository is the repaired version of the ZeroG Pulse submission. It is delivered as source;
+nothing was pushed to the original GitHub repository or to the existing Vercel deployment.
+
+### Local run
+
+```bash
+npm ci
+npm run dev        # http://localhost:5173
+npm run build      # production bundle in dist/
+npm run preview    # serve the production build
+npm run lint       # oxlint
+```
+
+### Optional AI provider keys
+
+Copy `.env.example` to `.env` and fill only the providers you actually use:
+
+```
+VITE_GROQ_API_KEY=
+VITE_GEMINI_API_KEY=
+VITE_OPENROUTER_API_KEY=
+```
+
+`VITE_*` values are compiled into the public JavaScript bundle. They are configuration, not secret
+storage: anyone can read them in DevTools. If a key must stay private, put it behind your own
+server-side proxy and call that proxy from the browser instead. The app works with no keys at all —
+it answers from the onboard deterministic engine, and the no-key Pollinations tier is attempted
+first as a best-effort online path. Keys can also be entered per user in the app's
+"Configure AI Engine" dialog; those stay in that browser's `localStorage`.
+
+### Deploy to Vercel
+
+1. Create a new empty repository and push this folder (`git init`, commit, push) — do not push over
+   the existing `ultimateXD/zerog-pulse` history unless you intend to replace it.
+2. In Vercel: **Add New → Project → Import** the repository.
+3. Framework preset: **Vite**. Build command `npm run build`. Output directory `dist`.
+4. Add the `VITE_*` environment variables (optional) under **Settings → Environment Variables**.
+5. Deploy. No server runtime, database or API route is required — this is a static SPA.
+6. After deploying, rotate any provider key that was previously committed in the old build.
+
+### Evidence
+
+`TEST_EVIDENCE.md` records the measured build, lint, layout, frame-timing, interaction and AI-failover
+results, including what was *not* verified. `CHANGELOG.md` lists every change and the two things this
+repair deliberately refuses to do (hide public keys, promise a bug-free or 100 %-uptime system).

@@ -1,0 +1,18 @@
+{
+  "const NASA_DATA_CONFIG =": {
+    "identical_raw": true,
+    "identical_normalized": true,
+    "orig_sha256": "4ef246717e299b03",
+    "new_sha256": "4ef246717e299b03",
+    "orig_len": 26929,
+    "new_len": 26929
+  },
+  "challengeResources": {
+    "identical_raw": true,
+    "identical_normalized": true,
+    "orig_sha256": "d9679a019b669f5e",
+    "new_sha256": "d9679a019b669f5e",
+    "orig_len": 286,
+    "new_len": 286
+  }
+}
