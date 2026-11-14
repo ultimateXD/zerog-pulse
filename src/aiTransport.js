@@ -181,7 +181,7 @@ function markServerUp() {
   if (!statusCache || statusCache.value.available !== true) getServerStatus({ force: true });
 }
 
-async function askServer({ system, messages, maxTokens, budgetMs, preferred, model, only, strict, signal, onEvent, onDelta }) {
+async function askServer({ system, messages, maxTokens = LIMITS.maxTokens, budgetMs, preferred, model, only, strict, signal, onEvent, onDelta }) {
   throwIfAborted(signal);
   const controller = new AbortController();
   const onAbort = () => controller.abort();
@@ -190,7 +190,7 @@ async function askServer({ system, messages, maxTokens, budgetMs, preferred, mod
   // arrives the deadline is absolute (attempt/failover events do not extend it);
   // afterwards a stall timer and a total cap apply.
   let timer = setTimeout(() => controller.abort(), budgetMs + 1500);
-  const totalTimer = setTimeout(() => controller.abort(), LIMITS.totalMs + 3000);
+  const totalTimer = setTimeout(() => controller.abort(), budgetMs + LIMITS.totalMs + 3000);
   const rearm = () => { clearTimeout(timer); timer = setTimeout(() => controller.abort(), LIMITS.stallMs + 2000); };
   let text = '';
   try {
@@ -225,7 +225,7 @@ async function askServer({ system, messages, maxTokens, budgetMs, preferred, mod
     }
     const reader = res.body.getReader();
     // A client deadline must settle a pending read() even if the body ignores the signal.
-    controller.signal.addEventListener('abort', () => { reader.cancel().catch(() => { }); }, { once: true });
+    controller.signal.addEventListener('abort', () => { reader.cancel().catch(() => {}); }, { once: true });
     const decoder = new TextDecoder();
     let buf = '';
     let done = null;
@@ -246,7 +246,7 @@ async function askServer({ system, messages, maxTokens, budgetMs, preferred, mod
         onEvent?.({ ...evt, source: 'server' });
       }
     };
-    for (; ;) {
+    for (;;) {
       const { value, done: finished } = await reader.read();
       if (controller.signal.aborted) throw abortError();
       if (finished) break;
@@ -303,7 +303,7 @@ async function askRelay({ system, messages, signal, onDelta, timeoutMs = 6000 })
     const res = await fetch('https://text.pollinations.ai/openai', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'openai', messages: [{ role: 'system', content: system }, ...messages] }),
+      body: JSON.stringify({ model: 'openai', max_tokens: LIMITS.maxTokens, messages: [{ role: 'system', content: system }, ...messages] }),
       signal: controller.signal,
     });
     if (!res.ok) throw new AttemptError(res.status === 402 || res.status === 429 ? 'rate' : 'server', 'Public relay HTTP ' + res.status, { status: res.status });
@@ -336,7 +336,7 @@ function providerOrder(preferred, only) {
  * tier answered — attempts attached), or any kind with `emitted:true` + `partial`
  * when a link dropped after text was already streamed.
  */
-export async function askMedAI({ engine, system, history = [], prompt, maxTokens = 1800, signal, onEvent, onDelta, budgetMs = LIMITS.budgetMs, only = false, strict = false, preferBrowser = false }) {
+export async function askMedAI({ engine, system, history = [], prompt, maxTokens = LIMITS.maxTokens, signal, onEvent, onDelta, budgetMs = LIMITS.budgetMs, only = false, strict = false, preferBrowser = false }) {
   throwIfAborted(signal);
   const eng = normalizeEngine(engine);
   if (eng.provider === 'onboard') throw new AttemptError('onboard', 'Onboard engine selected', { attempts: [] });
@@ -483,9 +483,9 @@ export async function testConnection({ engine, signal } = {}) {
     system: 'You are a connectivity check for a medical dashboard. Reply with the exact words: MED-AI LINK OK',
     history: [],
     prompt: 'Reply with exactly: MED-AI LINK OK',
-    maxTokens: 120,
+    maxTokens: LIMITS.maxTokens,
     signal,
-    budgetMs: 9000,
+    budgetMs: LIMITS.budgetMs,
     only: eng.provider !== 'auto',
     strict: Boolean(eng.model),
     preferBrowser: true,
@@ -506,6 +506,7 @@ const KIND_TEXT = {
   network: 'network error',
   timeout: 'timed out',
   empty: 'empty answer',
+  truncated: 'output token limit reached',
   blocked: 'blocked by provider firewall',
   cooldown: 'cooling down',
   unconfigured: 'no key configured',

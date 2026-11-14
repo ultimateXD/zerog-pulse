@@ -1593,7 +1593,8 @@ function buildLiveSystemPrompt(ctx) {
     '3. NASA Ongoing HRP Research (https://www.nasa.gov/hrp/ongoing-hrp-research/): NASA Standard Measures, ARCHeR (sleep/HRV), and CIPHER multi-organ studies.\n' +
     '4. CSA Monitoring Radiation (https://www.asc-csa.gc.ca/eng/news/articles/2026/2026-02-26-monitoring-radiation-astronaut-health.asp): Canadian Active Neutron Spectrometer (CANS) and Bubble Detector real-time mSv/day dosimetry.\n' +
     '5. CSA Space Science & Earth Dual-Use (https://www.asc-csa.gc.ca/eng/iss/science/why-do-we-conduct-science-experiments-in-space.asp): CSA Bio-Monitor Smart Shirt + AI platform and CARDIOBREATH cardiovascular/respiratory tracking for astronauts and remote Earth patients.\n' +
-    'LANGUAGE & COMPLETION RULE: Always reply in the EXACT SAME LANGUAGE used by the user (Arabic if Arabic, English if English). Cite relevant NASA HRP, CSA, and NASA-STD-3001 standards naturally and finish all sentences completely.';
+    'LANGUAGE & COMPLETION RULE: Always reply in the EXACT SAME LANGUAGE used by the user (Arabic if Arabic, English if English). Cite relevant NASA HRP, CSA, and NASA-STD-3001 standards naturally and finish all sentences completely.\n' +
+    'STRICT OUTPUT RULE: Never use Markdown pipe tables (`|...|`); always format parameters and protocols as clean numbered steps or bullet points, and always finish every sentence completely. Include units with every numeric parameter. Keep the answer focused rather than filling the token budget; complete the final step and sentence before stopping.';
 }
 
 
@@ -2004,8 +2005,8 @@ const ChatBubble = React.memo(function ChatBubble({ msg }) {
   );
 });
 
-const CHAT_REPLY_TOKENS = 640;
-const AUTO_REPLY_TOKENS = 450;
+const CHAT_REPLY_TOKENS = 4096;
+const AUTO_REPLY_TOKENS = 4096;
 
 function scenarioTitleOf(ctx) {
   const s = ctx && (ctx.scenario || ctx.activeScenario);
@@ -2191,7 +2192,7 @@ function AIChat({ ctx }) {
   /* One MED-AI answer: Vercel-key proxy → browser keys → (opt-in relay) → onboard.
    * Live answers stream into a single message; a dropped link keeps the streamed
    * text and the onboard engine completes the answer. */
-  const runQuery = useCallback((promptText, historySnapshot, currentCtx, maxTokens) => {
+  const runQuery = useCallback((promptText, historySnapshot, currentCtx, maxTokens = CHAT_REPLY_TOKENS) => {
     cancelQuery();
     const controller = new AbortController();
     queryRef.current = controller;
@@ -2292,8 +2293,8 @@ function AIChat({ ctx }) {
       if (streamId !== null) {
         release();
         const notice = isArabic(promptText)
-          ? '**[انقطع الاتصال المباشر — يكمل المحرك الطبي الداخلي]**'
-          : '**[LINK DROPPED — ONBOARD ENGINE CONTINUES]**';
+          ? (err.kind === 'truncated' ? '**[بلغ الرد حد الرموز — يكمل المحرك الطبي الداخلي]**' : '**[انقطع الاتصال المباشر — يكمل المحرك الطبي الداخلي]**')
+          : (err.kind === 'truncated' ? '**[OUTPUT LIMIT REACHED — ONBOARD ENGINE CONTINUES]**' : '**[LINK DROPPED — ONBOARD ENGINE CONTINUES]**');
         finalize({ text: (text.trim() ? text.trim() + '\n\n---\n' : '') + notice + '\n' + buildAIResponse(promptText, currentCtx) });
         setLastRoute({ provider: 'onboard', model: '', via: 'local', reason });
         return;

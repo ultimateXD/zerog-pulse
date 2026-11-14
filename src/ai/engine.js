@@ -24,7 +24,8 @@ export const PROVIDERS = Object.freeze({
     keyHint: 'console.groq.com → API Keys',
     chatUrl: 'https://api.groq.com/openai/v1/chat/completions',
     modelsUrl: 'https://api.groq.com/openai/v1/models',
-    autoModels: Object.freeze(['openai/gpt-oss-20b', 'qwen/qwen3.8-27b', 'allam-2-7b']),
+    // Qwen runs with reasoning_effort: 'none'; GPT-OSS is a low-reasoning fallback.
+    autoModels: Object.freeze(['qwen/qwen3.8-27b', 'openai/gpt-oss-20b', 'allam-2-7b']),
     publicModels: false,
   }),
   gemini: Object.freeze({
@@ -59,11 +60,11 @@ export const LIMITS = Object.freeze({
   historyChars: 900,      // per turn
   promptChars: 2000,
   systemChars: 9000,
-  maxTokens: 2048,         // hard ceiling per answer
+  maxTokens: 4096,        // hard ceiling per answer
   firstTokenMs: 3500,     // every keyed request must start streaming within 3.5 s
-  stallMs: 6000,          // max silence between streamed chunks
-  totalMs: 25000,         // max length of one streamed answer
-  budgetMs: 8000,         // time allowed to find a working provider before onboard takes over
+  stallMs: 15000,         // max silence between streamed chunks
+  totalMs: 120000,        // max length of one streamed answer
+  budgetMs: 20000,        // time allowed to find a working provider before onboard takes over
 });
 
 const MODEL_ID_RE = /^[A-Za-z0-9][\w.:/@+-]{0,159}$/;
@@ -179,10 +180,10 @@ function geminiThinking(model) {
   return null;
 }
 
-export function buildRequest(providerId, { key, model, fallbacks = [], system, messages, maxTokens, stream = true, plain = false, appUrl = '', appTitle = APP_TITLE }) {
+export function buildRequest(providerId, { key, model, fallbacks = [], system, messages, maxTokens = LIMITS.maxTokens, stream = true, plain = false, appUrl = '', appTitle = APP_TITLE }) {
   const p = PROVIDERS[providerId];
   if (!p) throw new AttemptError('config', 'Unknown provider ' + providerId);
-  const budget = Math.max(16, Math.min(LIMITS.maxTokens, Math.round(maxTokens || 1800)));
+  const budget = Math.max(16, Math.min(LIMITS.maxTokens, Math.round(maxTokens || LIMITS.maxTokens)));
   const sys = String(system || '').slice(0, LIMITS.systemChars);
 
   if (p.style === 'gemini') {
@@ -333,13 +334,13 @@ export async function* readSSE(body, signal) {
   const tryParse = (txt) => { try { return JSON.parse(txt); } catch { return undefined; } };
   // Deadlines abort `signal`; cancelling the reader guarantees a pending read()
   // settles even if the underlying body ignores the fetch signal.
-  const onAbort = () => { reader.cancel().catch(() => { }); };
+  const onAbort = () => { reader.cancel().catch(() => {}); };
   if (signal) {
     if (signal.aborted) throw abortError();
     signal.addEventListener('abort', onAbort, { once: true });
   }
   try {
-    for (; ;) {
+    for (;;) {
       const { value, done } = await reader.read();
       if (signal && signal.aborted) throw abortError();
       if (done) break;
@@ -412,7 +413,7 @@ function completionFromJSON(style, data) {
 
 /* One streamed request to one provider/model, with first-token, stall and
  * total deadlines. Throws AttemptError; `emitted` marks a mid-answer drop. */
-export async function streamOnce({ provider, key, model, fallbacks, plain, system, messages, maxTokens, signal, answerBy, firstTokenMs = LIMITS.firstTokenMs, stallMs = LIMITS.stallMs, totalMs = LIMITS.totalMs, onDelta, fetchImpl, appUrl, appTitle }) {
+export async function streamOnce({ provider, key, model, fallbacks, plain, system, messages, maxTokens = LIMITS.maxTokens, signal, answerBy, firstTokenMs = LIMITS.firstTokenMs, stallMs = LIMITS.stallMs, totalMs = LIMITS.totalMs, onDelta, fetchImpl, appUrl, appTitle }) {
   throwIfAborted(signal);
   const p = PROVIDERS[provider];
   const doFetch = fetchImpl || globalThis.fetch.bind(globalThis);
@@ -434,6 +435,7 @@ export async function streamOnce({ provider, key, model, fallbacks, plain, syste
     watchdog = text ? setTimeout(() => stop('stall'), stallMs) : setTimeout(() => stop('first-token'), untilAnswer(stallMs));
   };
   let served = model;
+  let finishReason = '';
   const fail = (err) => {
     if (reason === 'cancelled' || (signal && signal.aborted)) return abortError();
     if (err instanceof AttemptError) { err.emitted = Boolean(text); err.partial = text; return err; }
@@ -455,6 +457,8 @@ export async function streamOnce({ provider, key, model, fallbacks, plain, syste
       if (!whole) throw new AttemptError('empty', 'Empty response from ' + model);
       text = whole;
       onDelta?.(whole, { provider, model: data?.model || model });
+      const finish = p.style === 'gemini' ? data?.candidates?.[0]?.finishReason : data?.choices?.[0]?.finish_reason;
+      if (finish === 'length' || finish === 'MAX_TOKENS') throw new AttemptError('truncated', 'Provider reached the output token limit before finishing');
       return { text: whole, model: data?.model || model };
     }
     for await (const evt of readSSE(res.body, controller.signal)) {
@@ -464,6 +468,7 @@ export async function streamOnce({ provider, key, model, fallbacks, plain, syste
         throw new AttemptError(c.kind, 'Stream error — ' + d.error.message.slice(0, 200), { status: d.error.status, retryAfterMs: c.retryAfterMs });
       }
       if (d.model) served = d.model;
+      if (d.finish) finishReason = d.finish;
       if (d.text) {
         text += d.text;
         onDelta?.(d.text, { provider, model: served });
@@ -471,6 +476,7 @@ export async function streamOnce({ provider, key, model, fallbacks, plain, syste
       if (d.alive) arm();
     }
     if (!text.trim()) throw new AttemptError('empty', 'Empty answer from ' + model + ' (reasoning used the whole token budget)');
+    if (finishReason === 'length' || finishReason === 'MAX_TOKENS') throw new AttemptError('truncated', 'Provider reached the output token limit before finishing');
     return { text: text.trim(), model: served };
   } catch (err) {
     throw fail(err);
