@@ -38,24 +38,52 @@ byte-for-byte identical to the original (SHA-256 `8cf9f019…a96c`).
 - `fmtVal` returns an em dash for `undefined`, `NaN` or infinite values instead of rendering
   non-finite numbers.
 
-## 4. Three-tier AI failover
+## 4. MED-AI engine (rebuilt)
+Files: `src/aiTransport.js` (browser), `src/ai/engine.js` (shared provider core),
+`api/medai.js` (Vercel Function), `vite.config.js` (same function in `npm run dev` / `preview`).
 
-| Tier | Transport | Deadline |
+| Order | Tier | Notes |
 | --- | --- | --- |
-| 1 | Configured providers (Groq / Gemini / OpenRouter) from `VITE_*` env or the user's own key, run concurrently, first valid answer wins | 3.5 s per request, headers **and** body |
-| 2 | `POST https://text.pollinations.ai/openai`, `model: "openai"`, no auth header | 6 s |
-| 3 | Onboard deterministic NASA-STD-3001 builder (English and Arabic) | immediate |
+| 1 | `/api/medai` with the Vercel env keys | Reads `GROQ_API_KEY`… or the existing `VITE_GROQ_API_KEY`, `VITE_GEMINI_API_KEY`, `VITE_OPENROUTER_API_KEY`, `VITE_HUGGINGFACE_API_KEY` at runtime on the server; streams NDJSON. Keys never reach the bundle. |
+| 2 | Browser keys from "Configure AI Engine" | Stored only in that browser's `localStorage` (`zgp_ai_engine_v2`), called directly (all four providers allow CORS). |
+| 3 | Pollinations public relay | **Off by default** (opt-in checkbox). Max 1 request / 30 s, 6 s deadline, 120 s cool-down. |
+| 4 | Onboard deterministic NASA-STD-3001 engine (EN/AR) | Always available, immediate. |
 
-- Every request uses `AbortController` with a hard deadline; late responses cannot win.
-- Tier 2 validates the OpenAI response schema and non-empty content before accepting it.
-- Tier 3 also runs immediately when the browser reports offline or the user selects the onboard
-  engine. The old 28-second failover timer and the artificial 450 ms local delay are gone.
-- Each reply is badged with the provider that actually answered; the header metadata follows the
-  completed request, not the merely selected one.
-- **No credentials are embedded.** The previous build shipped hard-coded provider keys and
-  obfuscated them; those are removed rather than disguised. Keys come from `VITE_*` environment
-  variables (still public in a client bundle) or from the user's own browser-local settings.
-  Rotate any key that was previously published.
+- Providers are tried **sequentially** (one provider billed per answer) in the order Groq → Gemini →
+  OpenRouter → Hugging Face, with a 3.5 s first-token deadline, 6 s stall deadline, 8 s chain budget
+  and 25 s per-answer cap. Health memory skips a failing provider for a short cool-down and remembers
+  dead model IDs for 12 h, so a retired model costs at most one wasted call.
+- **No model is auto-selected.** The modal opens on AUTOMATIC; the full live catalogue is listed
+  for browsing (AUTO #n / FREE / LIGHT / context tags) and a model is used only if the user pins it.
+  "Fetch & Verify" auto-locking was removed. Legacy saved settings migrate to AUTOMATIC.
+- Light, current models: Groq `openai/gpt-oss-20b` → `qwen/qwen3.8-27b` → `allam-2-7b` (the 120B
+  model stays browsable but is never picked automatically);
+  Gemini `gemini-3.5-flash-lite` → `gemini-3.1-flash-lite` → `gemini-flash-lite-latest` →
+  `gemini-2.5-flash-lite`; OpenRouter `meta-llama/llama-3.1-8b-instruct` →
+  `google/gemini-2.5-flash-lite` → `openrouter/free` (402 → free models); Hugging Face router
+  `meta-llama/Llama-3.1-8B-Instruct` → `google/gemma-3-4b-it` → `Qwen/Qwen3.5-9B`.
+  `llama-3.1-8b-instant`, `gemini-1.5-flash`, `google/gemini-flash-1.5` and
+  `mistralai/Mistral-7B-Instruct-v0.2` are retired or unavailable and are not used automatically.
+- Calibrated requests: Groq `max_completion_tokens` + low reasoning; Gemini
+  `:streamGenerateContent?alt=sse`, `x-goog-api-key`, `systemInstruction`, minimal thinking;
+  OpenRouter `HTTP-Referer`, `X-OpenRouter-Title`/`X-Title`, `models` fallback array, low reasoning;
+  Hugging Face `router.huggingface.co/v1`. Unsupported optional parameters are retried once plain.
+- Save Engine now updates the header badge immediately from the saved engine (not from the last
+  reply) and persists across reloads; a separate "↳ last responder" pill shows who actually answered.
+- Streaming replies render token by token; a mid-answer drop keeps the partial text and the
+  onboard engine completes the turn instead of silently stalling.
+- `/api/medai` guards: same-origin check, 20 requests/min per IP (best effort, per instance),
+  64 KB body cap enforced while reading (also for chunked bodies, in the function and in the
+  dev/preview middleware), error text and every reported attempt scrubbed of key material.
+- Hard deadlines: before the first answer word, keep-alive, reasoning and failover events can no
+  longer stretch the wait past the chain budget (server and browser), and the opt-in relay only
+  uses whatever budget is left, so the onboard answer arrives within about 8–10 s at worst
+  (typical live answers start in under 2 s).
+- Proxy status has three states: available, absent (static host / 404) and unknown (slow cold
+  start, 5xx, timeout). Unknown still tries the proxy instead of reporting "no keys".
+- Anything shown in the UI (failure notes, catalogue errors) passes through key redaction, so a
+  provider that echoes a pasted key cannot display it.
+- SSE events split across several `data:` lines are joined per the SSE spec.
 
 ## 5. Lifecycle, races and cleanup
 
@@ -93,6 +121,6 @@ byte-for-byte identical to the original (SHA-256 `8cf9f019…a96c`).
 ## 8. Deliberately not done
 
 - Provider keys are **not** split or obfuscated to dodge secret scanning. Obfuscation does not make a
-  client-side key secret; use a server proxy if keys must stay private.
+  client-side key secret; the keys now live server-side in `api/medai.js` instead.
 - No claim of "zero bugs" or "100 % uptime". The measured evidence and the remaining limits are in
   `TEST_EVIDENCE.md`.

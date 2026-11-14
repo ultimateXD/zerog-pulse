@@ -57,32 +57,31 @@ npm run preview    # serve the production build
 npm run lint       # oxlint
 ```
 
-### Optional AI provider keys
+### AI provider keys (server-side)
 
-Copy `.env.example` to `.env` and fill only the providers you actually use:
+Keys are read **at runtime by the Vercel Function `api/medai.js`** and never compiled into the
+browser bundle. Either naming works; the un-prefixed names are recommended:
 
 ```
-VITE_GROQ_API_KEY=
-VITE_GEMINI_API_KEY=
-VITE_OPENROUTER_API_KEY=
+GROQ_API_KEY=            # or VITE_GROQ_API_KEY
+GEMINI_API_KEY=          # or VITE_GEMINI_API_KEY
+OPENROUTER_API_KEY=      # or VITE_OPENROUTER_API_KEY
+HUGGINGFACE_API_KEY=     # or VITE_HUGGINGFACE_API_KEY / HF_TOKEN
 ```
 
-`VITE_*` values are compiled into the public JavaScript bundle. They are configuration, not secret
-storage: anyone can read them in DevTools. If a key must stay private, put it behind your own
-server-side proxy and call that proxy from the browser instead. The app works with no keys at all —
-it answers from the onboard deterministic engine, and the no-key Pollinations tier is attempted
-first as a best-effort online path. Keys can also be entered per user in the app's
-"Configure AI Engine" dialog; those stay in that browser's `localStorage`.
+For local work copy `.env.example` to `.env`; `npm run dev` and `npm run preview` serve the same
+`/api/medai` function. With no keys at all the app still answers from the onboard engine. Users can
+also paste their own key in "Configure AI Engine"; that key stays in their browser's `localStorage`.
 
 ### Deploy to Vercel
 
-1. Create a new empty repository and push this folder (`git init`, commit, push) — do not push over
-   the existing `ultimateXD/zerog-pulse` history unless you intend to replace it.
-2. In Vercel: **Add New → Project → Import** the repository.
+1. Push this folder to your repository.
+2. In Vercel: **Add New → Project → Import** the repository (or redeploy the existing project).
 3. Framework preset: **Vite**. Build command `npm run build`. Output directory `dist`.
-4. Add the `VITE_*` environment variables (optional) under **Settings → Environment Variables**.
-5. Deploy. No server runtime, database or API route is required — this is a static SPA.
-6. After deploying, rotate any provider key that was previously committed in the old build.
+4. Set the provider keys under **Settings → Environment Variables** (existing `VITE_*` names are
+   accepted). The `api/` folder is deployed automatically as a Vercel Function — no `vercel.json`.
+5. Deploy, then open `/api/medai` — it returns which providers are configured (booleans only).
+6. Rotate any provider key that was previously shipped in a public bundle.
 
 ### Evidence
 

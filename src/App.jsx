@@ -10,8 +10,12 @@
  * everything renders dynamically from this single configuration object.
  * ==========================================================================*/
 
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { DEFAULT_KEYS, requestJSON, completionText, callPollinations, firstSuccessful, throwIfAborted } from './aiTransport';
+import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
+import {
+  PROVIDERS, PROVIDER_ORDER, askMedAI, loadEngine, saveEngine, normalizeEngine, hasBrowserKeys,
+  getServerStatus, peekServerStatus, listModels, testConnection, describeFailure, providerLabel, redactSecrets,
+  detectProviderFromKey, resetHealth,
+} from './aiTransport';
 import { isArabic, speechLanguage, buildArabicResponse } from './clinicalArabic';
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, Legend,
@@ -440,45 +444,26 @@ const NASA_DATA_CONFIG = {
 
 /* ============================================================================
  * SECTION 0b — AI ENGINE CONFIG (multi-provider live LLM support)
+ * Provider endpoints, model catalogs and failover live in src/ai/engine.js.
+ * These entries are only the selectable tiles of the "Configure AI Engine" modal.
  * ==========================================================================*/
 const AI_ENGINES = {
   providers: [
-    {
-      id: 'huggingface', label: 'Hugging Face Router', badge: '🤗 Hugging Face Live', style: 'openai',
-      endpoint: 'https://router.huggingface.co/hf-inference/models/Qwen/Qwen2.5-72B-Instruct/v1/chat/completions',
-      defaultModel: 'Qwen/Qwen2.5-72B-Instruct',
-      models: ['Qwen/Qwen2.5-72B-Instruct'],
-      needsKey: true, allowCustomModel: true, keyHint: 'huggingface.co → Settings → Access Tokens',
-    },
-
-    {
-      id: 'groq', label: 'Groq Cloud', badge: '⚡ Groq Live', style: 'openai',
-      endpoint: 'https://api.groq.com/openai/v1/chat/completions',
-      defaultModel: 'llama-3.3-70b-versatile',
-      models: ['llama-3.3-70b-versatile', 'mixtral-8x7b-32768', 'llama-3.1-8b-instant'],
-      needsKey: true, keyHint: 'console.groq.com — free API key',
-    },
-    {
-      id: 'openrouter', label: 'OpenRouter', badge: '🌐 OpenRouter Live', style: 'openai',
-      endpoint: 'https://openrouter.ai/api/v1/chat/completions',
-      defaultModel: 'meta-llama/llama-3.3-70b-instruct:free',
-      models: ['meta-llama/llama-3.3-70b-instruct:free', 'google/gemini-2.0-flash-exp:free'],
-      needsKey: true, allowCustomModel: true, keyHint: 'openrouter.ai — free models available',
-    },
-    {
-      id: 'gemini', label: 'Google Gemini', badge: '✨ Gemini Live', style: 'gemini',
-      endpoint: 'https://generativelanguage.googleapis.com/v1beta/models/',
-      defaultModel: 'gemini-2.5-flash',
-      models: ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'],
-      needsKey: true, keyHint: 'aistudio.google.com — free API key',
-    },
-    {
-      id: 'onboard', label: 'Built-in Autonomous Engine', badge: '🛡️ Onboard Local AI', style: 'offline',
-      endpoint: null, defaultModel: 'zerog-clinical-v3', models: [], needsKey: false, keyHint: '',
-    },
+    { id: 'auto', label: 'Auto Failover', badge: '🔀 Auto Failover', note: 'Recommended — picks a live, light model per query' },
+    { id: 'groq', label: 'Groq Cloud', badge: '⚡ Groq Live', note: 'Free tier · fastest first token' },
+    { id: 'gemini', label: 'Google Gemini', badge: '✨ Gemini Live', note: 'Free tier · Google AI Studio key' },
+    { id: 'openrouter', label: 'OpenRouter', badge: '🌐 OpenRouter Live', note: 'Free router + low-cost light models' },
+    { id: 'huggingface', label: 'Hugging Face Router', badge: '🤗 Hugging Face Live', note: 'Inference Providers router' },
+    { id: 'onboard', label: 'Built-in Autonomous Engine', badge: '🛡️ Onboard Local AI', note: 'Zero config — works instantly' },
   ],
   systemPromptRole: 'You are MED-AI, the autonomous NASA Flight Surgeon aboard the Deep Space Transport Infinity-1, en route to Mars. Earth is 14m 28s away at light speed, so you alone must stabilize the crew. Answer as a clinical, decisive flight surgeon. Always cite the live telemetry values you are given. Reference NASA-STD-3001, OSD-51 and OSD-194 where relevant. Never invent medication dosages. Be concise, structured and mission-focused.',
 };
+
+function sourceBadge(source) {
+  if (source === 'pollinations') return 'Pollinations Live';
+  const tile = AI_ENGINES.providers.find((p) => p.id === source && p.id !== 'auto');
+  return (tile || AI_ENGINES.providers[AI_ENGINES.providers.length - 1]).badge;
+}
 
 /* ============================================================================
  * SECTION 1 — Pure helpers (no hardcoded medical values)
@@ -1160,10 +1145,13 @@ function computeOrganStresses(values) {
 const OrganTwinView = React.memo(function OrganTwinView({ values, scenarioId }) {
   const organs = NASA_DATA_CONFIG.organTwin.organs;
   const [selectedId, setSelectedId] = useState(SCENARIO_ORGAN_MAP[scenarioId] || organs[0].id);
-  useEffect(() => {
+  // Follow the active emergency's organ (render-phase adjustment instead of a prop-sync effect).
+  const [seenScenario, setSeenScenario] = useState(scenarioId);
+  if (seenScenario !== scenarioId) {
+    setSeenScenario(scenarioId);
     const target = SCENARIO_ORGAN_MAP[scenarioId];
     if (target && organs.some((o) => o.id === target)) setSelectedId(target);
-  }, [scenarioId]);
+  }
 
   const organ = organs.find((o) => o.id === selectedId);
 
@@ -1596,81 +1584,16 @@ function buildSystemPrompt(ctx) {
     + 'Answer format: concise clinical assessment, quote live values, then numbered urgent actions.';
 }
 
-const PROVIDER_ROUTING = {
-  groq: { style: 'openai', endpoint: 'https://api.groq.com/openai/v1/chat/completions', model: 'llama-3.1-8b-instant' },
-  openrouter: { style: 'openai', endpoint: 'https://openrouter.ai/api/v1/chat/completions', model: 'meta-llama/llama-3.3-70b-instruct:free' },
-  gemini: { style: 'gemini', endpoint: 'https://generativelanguage.googleapis.com/v1beta/models/', model: 'gemini-2.5-flash' },
-  huggingface: { style: 'openai', endpoint: 'https://router.huggingface.co/hf-inference/models/Qwen/Qwen2.5-72B-Instruct/v1/chat/completions', model: 'Qwen/Qwen2.5-72B-Instruct' },
-  onboard: null,
-};
-
-function detectProviderFromKey(key) {
-  const k = String(key || '').trim();
-  if (k.indexOf('gsk_') === 0) return 'groq';
-  if (k.indexOf('sk-or-') === 0) return 'openrouter';
-  if (k.indexOf('AIza') === 0) return 'gemini';
-  if (k.indexOf('hf_') === 0) return 'huggingface';
-  return null;
-}
-
-async function callLiveAI(engine, systemPrompt, convo, userText, maxTokens, signal) {
-  const cleanKey = String(engine.key || '').trim();
-  const detected = detectProviderFromKey(cleanKey);        /* auto-detect even if the wrong tab is selected */
-  const providerId = detected || String(engine.provider || '').trim();
-  const route = PROVIDER_ROUTING[providerId];
-  if (!route || !cleanKey) throw new Error('No live provider configured — use the onboard engine.');
-  const model = String(engine.model || '').trim() || route.model;
-  const budget = maxTokens || 2048;
-
-  const history = convo.filter((m) => m.role === 'user' || m.role === 'ai')
-    .slice(-6)
-    .map((m) => ({ role: m.role === 'ai' ? 'assistant' : 'user', content: m.text }));
-
-  if (route.style === 'gemini') {
-    const url = route.endpoint + model + ':generateContent?key=' + encodeURIComponent(cleanKey);
-    const data = await requestJSON(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        system_instruction: { parts: [{ text: systemPrompt }] },
-        contents: history
-          .map((m) => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }))
-          .concat([{ role: 'user', parts: [{ text: userText }] }]),
-        generationConfig: { temperature: 0.4, maxOutputTokens: budget },
-      }),
-    }, signal, 3500);
-    return completionText(data, 'gemini');
-  }
-
-  /* Groq / OpenRouter / Hugging Face — strict OpenAI body, ONLY these 2 headers (CORS-preflight safe) */
-  const data = await requestJSON(route.endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': 'Bearer ' + cleanKey,
-    },
-    body: JSON.stringify({
-      model: model,
-      temperature: 0.4,
-      max_tokens: budget,
-      messages: [{ role: 'system', content: systemPrompt }]
-        .concat(history)
-        .concat([{ role: 'user', content: userText }]),
-    }),
-  }, signal, 3500);
-  return completionText(data);
-}
-
-async function testAIConnection(engine, signal) {
-  const t0 = Date.now();
-  try {
-    await callLiveAI(engine, 'Connection test. Reply with the single word: OK', [], 'ping', 5, signal);
-    return { state: 'ok', msg: '✅ Connected! Latency: ' + (Date.now() - t0) + ' ms' };
-  } catch (err) {
-    throwIfAborted(signal);
-    console.warn('[MED-AI] connection test failed:', err && err.message ? err.message : err);
-    return { state: 'fail', msg: '❌ ' + String((err && err.message) || err) };
-  }
+/* Live-LLM system prompt: mission context + official challenge grounding + language rule. */
+function buildLiveSystemPrompt(ctx) {
+  return buildSystemPrompt(ctx) +
+    '\n\nOFFICIAL CHALLENGE RESOURCES & SCIENTIFIC GROUNDING:\n' +
+    '1. NASA HRP 5 Hazards (https://www.nasa.gov/hrp/hazards/): Space Radiation, Isolation/Confinement, Distance from Earth (14m 28s comm delay requiring autonomous AI), Gravity Fields, and Hostile/Closed Environments.\n' +
+    '2. NASA HRP Risks (https://www.nasa.gov/hrp/risks/): Spaceflight Associated Neuro-ocular Syndrome (SANS), Cardiovascular Deconditioning, Acute Hypoxia, and Circadian Desynchrony.\n' +
+    '3. NASA Ongoing HRP Research (https://www.nasa.gov/hrp/ongoing-hrp-research/): NASA Standard Measures, ARCHeR (sleep/HRV), and CIPHER multi-organ studies.\n' +
+    '4. CSA Monitoring Radiation (https://www.asc-csa.gc.ca/eng/news/articles/2026/2026-02-26-monitoring-radiation-astronaut-health.asp): Canadian Active Neutron Spectrometer (CANS) and Bubble Detector real-time mSv/day dosimetry.\n' +
+    '5. CSA Space Science & Earth Dual-Use (https://www.asc-csa.gc.ca/eng/iss/science/why-do-we-conduct-science-experiments-in-space.asp): CSA Bio-Monitor Smart Shirt + AI platform and CARDIOBREATH cardiovascular/respiratory tracking for astronauts and remote Earth patients.\n' +
+    'LANGUAGE & COMPLETION RULE: Always reply in the EXACT SAME LANGUAGE used by the user (Arabic if Arabic, English if English). Cite relevant NASA HRP, CSA, and NASA-STD-3001 standards naturally and finish all sentences completely.';
 }
 
 
@@ -1707,78 +1630,6 @@ const PredictiveBanner = React.memo(function PredictiveBanner({ pred }) {
     </div>
   );
 });
-const HF_SERVERLESS_MODELS = [
-  'Qwen/Qwen2.5-72B-Instruct',
-  'Qwen/Qwen2.5-Coder-32B-Instruct',
-  'meta-llama/Llama-3.2-3B-Instruct',
-  'mistralai/Mistral-7B-Instruct-v0.3',
-];
-
-const GROQ_BLOCKLIST = ['whisper', 'tts', 'playai', 'guard', 'embedding'];
-
-async function fetchAvailableModels(engine, signal) {
-  const cleanKey = String(engine.key || '').trim();
-  const providerId = detectProviderFromKey(cleanKey) || String(engine.provider || '').trim();
-  const route = PROVIDER_ROUTING[providerId];
-  if (!route) throw new Error('No live provider configured.');
-  let models = [];
-
-  if (providerId === 'groq') {
-    const data = await requestJSON('https://api.groq.com/openai/v1/models', {
-      headers: { 'Authorization': 'Bearer ' + cleanKey },
-    }, signal);
-    if (!Array.isArray(data.data)) throw new Error('Invalid model response');
-    models = (data.data || []).map((item) => {
-      const rawId = typeof item === 'string' ? item : String((item && (item.id || item.name)) || '').replace(/^models\//, '').trim();
-      return rawId;
-    }).filter((rawId) => rawId && !GROQ_BLOCKLIST.some((b) => String(rawId).toLowerCase().indexOf(b) > -1));
-  } else if (providerId === 'openrouter') {
-    const data = await requestJSON('https://openrouter.ai/api/v1/models', {}, signal);
-    if (!Array.isArray(data.data)) throw new Error('Invalid model response');
-    models = (data.data || []).map((item) => {
-      const rawId = typeof item === 'string' ? item : String((item && (item.id || item.name)) || '').replace(/^models\//, '').trim();
-      return rawId;
-    }).filter((rawId) => rawId);
-    models.sort((a, b) => (a.indexOf(':free') > -1 ? 0 : 1) - (b.indexOf(':free') > -1 ? 0 : 1));
-  } else if (providerId === 'gemini') {
-    const data = await requestJSON('https://generativelanguage.googleapis.com/v1beta/models?key=' + encodeURIComponent(cleanKey), {}, signal);
-    if (!Array.isArray(data.models)) throw new Error('Invalid model response');
-    models = (data.models || []).map((item) => {
-      const rawId = typeof item === 'string' ? item : String((item && (item.id || item.name)) || '').replace(/^models\//, '').trim();
-      return rawId;
-    }).filter((rawId) => rawId);
-  } else if (providerId === 'huggingface') {
-    models = HF_SERVERLESS_MODELS.slice();
-  }
-  return { provider: providerId, models: models.filter(Boolean).slice(0, 60) };
-}
-
-async function probeModel(engine, modelId, signal) {
-  const t0 = Date.now();
-  const id = String(modelId || '').trim();
-  if (!id) return { id: '', state: 'fail', ms: 0, msg: 'No model id' };
-  try {
-    const cleanKey = String(engine.key || '').trim();
-    const trial = {
-      key: cleanKey,
-      model: id,
-      provider: detectProviderFromKey(cleanKey) || engine.provider,
-    };
-    await callLiveAI(trial, 'Ping.', [], 'ping', 1, signal);
-    return { id: id, state: 'ok', ms: Date.now() - t0, msg: '' };
-  } catch (err) {
-    throwIfAborted(signal);
-    const raw = String((err && err.message) || err);
-    const short = raw.indexOf('HTTP 404') > -1 ? '404 Not Found'
-      : raw.indexOf('HTTP 429') > -1 ? '429 Rate Limit'
-        : raw.indexOf('HTTP 401') > -1 ? '401 Invalid Key'
-          : raw.indexOf('HTTP 403') > -1 ? '403 Forbidden'
-            : raw.indexOf('HTTP 400') > -1 ? '400 Rejected'
-              : raw.slice(0, 44);
-    console.warn('[MED-AI] probe failed for ' + id + ':', raw);
-    return { id: id, state: 'fail', ms: 0, msg: short };
-  }
-}
 
 
 function chatInline(t) {
@@ -1822,253 +1673,312 @@ function renderFormattedChat(text) {
   });
 }
 
-const AISettingsModal = React.memo(function AISettingsModal({ open, onClose, engine, setEngine }) {
+/* ============================================================================
+ * Configure AI Engine modal.
+ * The full model catalog is listed for browsing, but nothing is ever
+ * auto-selected: the default is AUTOMATIC, and the failover chain picks a
+ * live, light, quota-safe model per query. Clicking a row pins that model.
+ * ==========================================================================*/
+const AISettingsModal = React.memo(function AISettingsModal({ open, onClose, engine, onSave, serverStatus }) {
   if (!open) return null;
-  return <AISettingsModalContent onClose={onClose} engine={engine} setEngine={setEngine} />;
+  return <AISettingsModalContent onClose={onClose} engine={engine} onSave={onSave} serverStatus={serverStatus} />;
 });
 
-function AISettingsModalContent({ onClose, engine, setEngine }) {
-  const [draft, setDraft] = useState(engine);
+function fmtCtx(n) {
+  if (!n) return '';
+  return n >= 1000000 ? (n / 1000000).toFixed(n % 1000000 ? 1 : 0) + 'M ctx' : Math.round(n / 1000) + 'k ctx';
+}
+
+/* A key pasted into the wrong tab is moved to the provider its prefix belongs to. */
+function routeDraftKeys(draft) {
+  const keys = { ...draft.keys };
+  for (const slot of PROVIDER_ORDER) {
+    const owner = detectProviderFromKey(keys[slot]);
+    if (owner && owner !== slot && !keys[owner]) {
+      keys[owner] = keys[slot];
+      keys[slot] = '';
+    }
+  }
+  return normalizeEngine({ ...draft, keys });
+}
+
+const MODEL_ROW_LIMIT = 250;
+
+function AISettingsModalContent({ onClose, engine, onSave, serverStatus }) {
+  const [draft, setDraft] = useState(() => normalizeEngine(engine));
+  const [catalog, setCatalog] = useState({ state: 'idle', key: '', models: [], source: '', note: '' });
+  const [filter, setFilter] = useState('');
   const [test, setTest] = useState(null);
-  const [modelList, setModelList] = useState([]);
-  const [fetching, setFetching] = useState(false);
-  const [fetchErr, setFetchErr] = useState(null);
-  const workRef = useRef(null);
-  const mountedRef = useRef(false);
+  const testRef = useRef(null);
 
-  const cancelWork = useCallback(() => {
-    workRef.current?.abort();
-    workRef.current = null;
+  const tab = draft.provider;
+  const meta = PROVIDERS[tab] || null;
+  const tile = AI_ENGINES.providers.find((p) => p.id === tab) || AI_ENGINES.providers[0];
+  const browserKey = meta ? draft.keys[tab] : '';
+  const detected = detectProviderFromKey(browserKey);
+  const serverOn = (id) => Boolean(serverStatus && serverStatus.providers && serverStatus.providers[id]);
+  const pinned = meta ? draft.model : '';
+  const catalogKey = meta ? meta.id + '|' + browserKey : '';
+
+  const cancelTest = useCallback(() => {
+    testRef.current?.abort();
+    testRef.current = null;
   }, []);
-  const closeModal = () => { cancelWork(); onClose(); };
+  const closeModal = useCallback(() => { cancelTest(); onClose(); }, [cancelTest, onClose]);
+
   useEffect(() => {
-    mountedRef.current = true;
-    return () => { mountedRef.current = false; cancelWork(); };
-  }, [cancelWork]);
-  const beginWork = () => {
-    cancelWork();
+    const onKey = (e) => { if (e.key === 'Escape') closeModal(); };
+    window.addEventListener('keydown', onKey);
+    return () => { window.removeEventListener('keydown', onKey); cancelTest(); };
+  }, [closeModal, cancelTest]);
+
+  // Load the catalog whenever the provider tab or pasted key changes (debounced while typing).
+  useEffect(() => {
+    if (!meta) return undefined;
     const controller = new AbortController();
-    workRef.current = controller;
-    setFetching(false);
+    const timer = setTimeout(() => {
+      setCatalog({ state: 'loading', key: catalogKey, models: [], source: '', note: '' });
+      listModels({ provider: meta.id, key: browserKey, signal: controller.signal })
+        .then((r) => {
+          if (!controller.signal.aborted) setCatalog({ state: 'ready', key: catalogKey, models: r.models || [], source: r.source || '', note: r.note || '' });
+        })
+        .catch((err) => {
+          if (!controller.signal.aborted) setCatalog({ state: 'error', key: catalogKey, models: [], source: '', note: redactSecrets(String((err && err.message) || err), [browserKey]) });
+        });
+    }, browserKey ? 450 : 0);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [meta, browserKey, catalogKey]);
+
+  const edit = (patch) => {
+    cancelTest();
     setTest(null);
-    setModelList((list) => list.map((m) => m.state === 'probing' ? { ...m, state: 'untested' } : m));
-    return controller;
+    setDraft((d) => ({ ...d, ...patch }));
   };
-  const validWork = (controller) => mountedRef.current && workRef.current === controller && !controller.signal.aborted;
-  const updateDraft = (next, clearModels = false) => {
-    cancelWork();
-    setDraft(next);
-    setFetching(false);
+  const setKey = (value) => {
+    cancelTest();
     setTest(null);
-    setFetchErr(null);
-    setModelList((list) => clearModels ? [] : list.map((m) => m.state === 'probing' ? { ...m, state: 'untested' } : m));
+    setDraft((d) => ({ ...d, keys: { ...d.keys, [tab]: value } }));
   };
+  // Switching tiles never pre-selects a model: it always starts on AUTOMATIC.
+  const chooseTile = (id) => edit({ provider: id, model: id === draft.provider ? draft.model : '' });
 
-  const active = AI_ENGINES.providers.find((p) => p.id === draft.provider);
-  const keyClean = String(draft.key || '').trim();
-  const detected = detectProviderFromKey(keyClean);
-  const detectedLabel = detected ? ((AI_ENGINES.providers.find((p) => p.id === detected) || {}).label) : null;
-  const currentModel = String(draft.model || '').trim();
+  const models = useMemo(() => (catalog.key === catalogKey ? catalog.models : []), [catalog, catalogKey]);
+  const loading = Boolean(meta) && (catalog.key !== catalogKey || catalog.state === 'loading');
+  const query = filter.trim().toLowerCase();
+  const visible = useMemo(() => (query
+    ? models.filter((m) => m.id.toLowerCase().includes(query) || String(m.name || '').toLowerCase().includes(query))
+    : models), [models, query]);
+  const pinnedListed = !pinned || models.some((m) => m.id === pinned);
 
-  const patchRow = (id, patch) => {
-    setModelList((list) => list.map((m) => (m.id === id ? Object.assign({}, m, patch) : m)));
-  };
-
-  const runVerifyRow = async (id) => {
-    const controller = beginWork();
-    patchRow(id, { state: 'probing' });
-    try {
-      const r = await probeModel(draft, id, controller.signal);
-      if (validWork(controller)) patchRow(id, r);
-    } catch { /* Cancelled or superseded work must not update the draft. */ }
-  };
-
-  const runFetchAndVerify = async () => {
-    const controller = beginWork();
-    const draftSnapshot = draft;
-    setFetching(true);
-    setFetchErr(null);
-    setTest(null);
-    try {
-      const { models } = await fetchAvailableModels(draftSnapshot, controller.signal);
-      if (!validWork(controller)) return;
-      if (!models.length) throw new Error('No chat-capable models returned.');
-      const list = models.map((raw) => {
-        const modelId = typeof raw === 'string' ? raw : String((raw && (raw.id || raw.model || raw.name)) || '');
-        return { id: modelId, state: 'untested', ms: 0, msg: '' };
-      }).filter((m) => m.id);
-      setModelList(list);
-      const candidates = list.slice(0, 6);
-      const results = await Promise.all(candidates.map((m) => probeModel(draftSnapshot, m.id, controller.signal)));
-      if (!validWork(controller)) return;
-      const merged = list.map((m, i) => (i < candidates.length ? Object.assign({}, m, { id: String(results[i].id || m.id), state: results[i].state, ms: results[i].ms, msg: results[i].msg }) : m));
-      setModelList(merged);
-      const best = merged.filter((m) => m.state === 'ok').sort((a, b) => a.ms - b.ms)[0];
-      if (best && Boolean(best.id)) {
-
-        setDraft((d) => Object.assign({}, d, { model: best.id }));
-        setTest({ state: 'ok', msg: '✅ Ready to use: ' + best.id + ' (' + best.ms + ' ms)' });
-      }
-    } catch (err) {
-      if (!validWork(controller)) return;
-      setFetchErr(String((err && err.message) || err));
-      console.warn('[MED-AI] model discovery failed:', String((err && err.message) || err));
-    } finally {
-      if (validWork(controller)) setFetching(false);
-    }
-  };
-
+  const canTest = tab === 'onboard' || tab === 'auto' || serverOn(tab) || Boolean(browserKey.trim());
   const runTest = async () => {
-    const controller = beginWork();
-    if (!currentModel) {
-      setTest({ state: 'fail', msg: '❌ No model selected — verify the list and click a 🟢 WORKING model first.' });
-      return;
-    }
-    setTest({ state: 'wait', msg: 'Testing ' + currentModel + '…' });
+    cancelTest();
+    const controller = new AbortController();
+    testRef.current = controller;
+    const target = routeDraftKeys(draft);
+    setTest({ state: 'wait', msg: '⏳ Testing ' + tile.label + (meta ? ' · ' + (target.model || 'automatic model') : ' chain') + '…' });
     try {
-      const r = await testAIConnection(Object.assign({}, draft, { model: currentModel }), controller.signal);
-      if (validWork(controller)) setTest(r);
-    } catch { /* Cancellation is not a connection failure. */ }
+      const r = await testConnection({ engine: target, signal: controller.signal });
+      if (testRef.current !== controller) return;
+      testRef.current = null;
+      const via = r.via === 'server' ? 'Vercel env key' : r.via === 'browser' ? 'browser key' : r.via === 'relay' ? 'public relay' : 'local';
+      setTest({ state: 'ok', msg: '✅ Connected — ' + providerLabel(r.provider) + ' · ' + (r.model || 'auto') + ' · ' + via + ' · ' + r.ms + ' ms' });
+    } catch (err) {
+      if (testRef.current !== controller || controller.signal.aborted) return;
+      testRef.current = null;
+      setTest({ state: 'fail', msg: '❌ ' + describeFailure(err) });
+    }
   };
 
-  const sortedList = modelList.slice().sort((a, b) => {
-    const rank = (s) => (s === 'ok' ? 0 : s === 'probing' ? 1 : s === 'untested' ? 2 : 3);
-    const r = rank(a.state) - rank(b.state);
-    return r !== 0 ? r : (a.ms - b.ms);
-  });
+  const serverLine = !serverStatus || serverStatus.available === null
+    ? { cls: 'border-slate-700/60 bg-slate-900/60 text-slate-400', text: serverStatus ? '⏳ /api/medai is slow to answer (cold start?) — queries will still try it first.' : '⏳ Checking the /api/medai server proxy…' }
+    : !serverStatus.available
+      ? { cls: 'border-amber-500/30 bg-amber-500/10 text-amber-300', text: '⚠️ /api/medai proxy not reachable here — browser keys below or the onboard engine will answer.' }
+      : serverStatus.any
+        ? { cls: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300', text: '🔐 Vercel env keys active (server-side, never sent to the browser): ' + PROVIDER_ORDER.filter(serverOn).map((id) => PROVIDERS[id].label).join(' · ') }
+        : { cls: 'border-amber-500/30 bg-amber-500/10 text-amber-300', text: '⚠️ /api/medai is online but no provider key is set in the Vercel environment variables.' };
+
+  const tag = (text, cls) => <span className={'rounded px-1 py-px font-mono text-[9px] font-bold ' + cls}>{text}</span>;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label="Configure AI Engine">
       <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onClick={closeModal} />
       <div className="relative z-10 flex max-h-[88vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-sky-500/40 bg-slate-950 shadow-[0_0_40px_rgba(56,189,248,0.25)]">
         <div className="flex items-start justify-between gap-3 border-b border-slate-800 bg-slate-900/70 p-4">
           <h2 className="font-mono text-sm font-bold text-sky-300">🔑 Configure AI Engine — MED-AI Brain</h2>
-          <button onClick={closeModal} className="rounded-lg border border-slate-700 p-1.5 text-slate-400 hover:text-slate-200"><X size={16} /></button>
+          <button type="button" onClick={closeModal} aria-label="Close" className="rounded-lg border border-slate-700 p-1.5 text-slate-400 hover:text-slate-200"><X size={16} /></button>
         </div>
 
         <div className="flex-1 space-y-3 overflow-y-auto p-4">
+          <p className={'rounded-lg border p-2 font-mono text-xs ' + serverLine.cls}>{serverLine.text}</p>
+
           <div className="grid grid-cols-2 gap-2">
-            {AI_ENGINES.providers.map((p) => (
-              <button type="button" key={p.id} onClick={() => updateDraft({ provider: p.id, key: DEFAULT_KEYS[p.id] || '', model: p.defaultModel }, true)}
-                className={'rounded-xl border p-2.5 text-left transition-all ' + (
-                  draft.provider === p.id ? 'border-sky-500/70 bg-sky-500/15 text-sky-200'
-                    : 'border-slate-700 bg-slate-950/70 text-slate-300 hover:border-slate-500')}>
-                <p className="text-sm font-bold">{p.badge}</p>
-                <p className="text-xs text-slate-400">{p.needsKey ? 'API key required' : 'Zero config — works instantly'}</p>
-              </button>
-            ))}
+            {AI_ENGINES.providers.map((p) => {
+              const keyed = PROVIDERS[p.id] ? (serverOn(p.id) ? 'Vercel key ✓' : draft.keys[p.id] ? 'Browser key ✓' : 'API key required') : p.note;
+              return (
+                <button type="button" key={p.id} onClick={() => chooseTile(p.id)} aria-pressed={tab === p.id}
+                  className={'rounded-xl border p-2.5 text-left transition-all ' + (
+                    tab === p.id ? 'border-sky-500/70 bg-sky-500/15 text-sky-200'
+                      : 'border-slate-700 bg-slate-950/70 text-slate-300 hover:border-slate-500')}>
+                  <p className="text-sm font-bold">{p.badge}</p>
+                  <p className="text-xs text-slate-400">{keyed}</p>
+                </button>
+              );
+            })}
           </div>
 
-          {active.needsKey ? (
-            <>
-              <div>
-                <label className="font-mono text-xs font-bold uppercase tracking-widest text-slate-400">API Key</label>
-                <input type="password" value={draft.key} onChange={(e) => updateDraft(Object.assign({}, draft, { key: e.target.value }), true)}
-                  placeholder={'Paste ' + active.label + ' API key… (' + active.keyHint + ')'}
-                  className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-2 font-mono text-xs text-slate-200 placeholder-slate-600 outline-none focus:border-sky-500/60" />
-              </div>
-              {detected && detected === draft.provider && (
-                <p className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-2 font-mono text-xs text-emerald-300">
-                  ✅ Key format matches {active.label}.
-                </p>
-              )}
-              {detected && detected !== draft.provider && (
-                <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2 font-mono text-xs text-amber-300">
-                  🔎 Key prefix detected as <b>{detectedLabel}</b> — it will be auto-routed there automatically.
-                </p>
-              )}
-
-              <div className="flex items-center gap-2">
-                <button type="button" onClick={runFetchAndVerify} disabled={!keyClean || fetching}
-                  className="rounded-lg border border-sky-500/50 bg-sky-500/15 px-3 py-2 font-mono text-xs font-bold text-sky-300 transition-all hover:bg-sky-500/25 disabled:opacity-40">
-                  {fetching ? '⏳ Fetching & Verifying…' : '🔍 Fetch & Verify Available Models'}
-                </button>
-                {fetchErr && <p className="flex-1 font-mono text-xs font-bold text-rose-300">❌ {fetchErr}</p>}
-              </div>
-
-              {sortedList.length > 0 && (
-                <div>
-                  <p className="mb-1 font-mono text-xs font-bold uppercase tracking-widest text-slate-400">
-                    Select MED-AI Model — {sortedList.filter((m) => m.state === 'ok').length} verified working
-                  </p>
-                  <div className="max-h-56 space-y-1.5 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950/60 p-1.5">
-                    {sortedList.map((m) => {
-                      const modelId = typeof m.id === 'string' ? m.id : String((m && (m.id || m.model || m.name)) || '');
-                      const selected = Boolean(modelId) && Boolean(currentModel) && currentModel === modelId;
-
-                      const statusText = m.state === 'ok'
-                        ? '🟢 WORKING (' + m.ms + ' ms) — '
-                        : m.state === 'probing'
-                          ? '⏳ Testing… — '
-                          : m.state === 'fail'
-                            ? '🔴 ' + (m.msg || 'UNAVAILABLE') + ' — '
-                            : '⚪ UNTESTED — ';
-                      return (
-                        <button type="button" key={modelId}
-                          onClick={() => {
-                            if (m.state === 'probing' || m.state === 'fail') return;
-                            if (m.state === 'untested') { runVerifyRow(modelId); return; }
-                            updateDraft(Object.assign({}, draft, { model: modelId }));
-                            setTest({ state: 'ok', msg: '✅ Ready to use: ' + modelId + ' (' + m.ms + ' ms)' });
-                          }}
-                          className={'flex w-full items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-left transition-all ' + (
-                            selected
-                              ? 'border-2 border-emerald-400 bg-emerald-950/70 shadow-lg'
-                              : m.state === 'fail'
-                                ? 'border-slate-800 bg-slate-900/40 opacity-50'
-                                : 'border-slate-700 bg-slate-900/60 hover:border-slate-500')}>
-                          <span className="min-w-0 flex-1 truncate font-mono text-sm font-bold text-white">
-                            {statusText}{modelId}
-                          </span>
-                          {selected && (
-                            <span className="shrink-0 rounded bg-emerald-400 px-1.5 py-0.5 font-mono text-[10px] font-bold text-emerald-950">
-                              [✓ SELECTED]
-                            </span>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <p className="mt-1 font-mono text-[10px] text-slate-500">
-                    🟢 working on top · ⚪ click to verify · 🔴 unavailable · selected: <span className="text-emerald-400">{currentModel || 'none'}</span>
-                  </p>
-                  <div>
-                    <label className="font-mono text-xs font-bold uppercase tracking-widest text-slate-400">Active Model ID:</label>
-                    <input type="text" value={currentModel || ''} onChange={(e) => updateDraft(Object.assign({}, draft, { model: e.target.value }))}
-                      placeholder="e.g. llama-3.3-70b-versatile"
-                      className="mt-1 w-full rounded-lg border border-emerald-700/60 bg-slate-950/80 px-3 py-2 font-mono text-xs font-bold text-emerald-300 placeholder-slate-600 outline-none focus:border-emerald-500/70" />
-                    <p className="mt-0.5 font-mono text-[10px] text-slate-500">Click a 🟢 row to fill this automatically, or type any model id manually.</p>
-                  </div>
-
-                </div>
-              )}
-
-              <div className="flex items-center gap-2">
-                <button type="button" onClick={runTest} disabled={!keyClean || (test && test.state === 'wait')}
-                  className="rounded-lg border border-amber-500/50 bg-amber-500/15 px-3 py-2 font-mono text-xs font-bold text-amber-300 transition-all hover:bg-amber-500/25 disabled:opacity-40">
-                  ⚡ Test API Connection
-                </button>
-                {test && (
-                  <p className={'flex-1 font-mono text-xs font-bold ' + (test.state === 'ok' ? 'text-emerald-300' : test.state === 'fail' ? 'text-rose-300' : 'text-slate-400')}>
-                    {test.msg}
-                  </p>
-                )}
-              </div>
-
-              <p className="rounded-lg border border-slate-700/60 bg-slate-900/60 p-2 font-mono text-xs text-slate-400">
-                Active model on save: <span className="text-sky-300">{currentModel || active.defaultModel}</span> · Key stored in this browser only. If a call ever fails, MED-AI silently answers from the onboard clinical engine.
-              </p>
-            </>
-          ) : (
+          {tab === 'onboard' && (
             <p className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-2 font-mono text-xs text-emerald-300">
               Onboard Autonomous Engine selected — instant, offline, zero configuration. Ideal for the live judge demo.
             </p>
           )}
+
+          {tab === 'auto' && (
+            <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-2">
+              <p className="mb-1 font-mono text-xs font-bold uppercase tracking-widest text-slate-400">Failover chain — tried in order, one provider billed per answer</p>
+              {PROVIDER_ORDER.map((id, i) => {
+                const sv = serverOn(id);
+                const bk = Boolean(draft.keys[id]);
+                return (
+                  <div key={id} className="flex items-center gap-2 border-t border-slate-800/70 py-1 font-mono text-[11px]">
+                    <span className="w-40 shrink-0 text-slate-300">{i + 1}. {PROVIDERS[id].label}</span>
+                    <span className={'shrink-0 ' + (sv || bk ? 'text-emerald-300' : 'text-slate-600')}>
+                      {sv && bk ? 'Vercel + browser key' : sv ? 'Vercel key ✓' : bk ? 'browser key ✓' : 'no key — skipped'}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-right text-slate-500">{PROVIDERS[id].autoModels[0]}</span>
+                  </div>
+                );
+              })}
+              <div className="flex items-center gap-2 border-t border-slate-800/70 py-1 font-mono text-[11px]">
+                <span className="w-40 shrink-0 text-slate-300">{PROVIDER_ORDER.length + 1}. Pollinations relay</span>
+                <span className={draft.publicRelay ? 'text-amber-300' : 'text-slate-600'}>{draft.publicRelay ? 'on (1 request / 30 s)' : 'off'}</span>
+              </div>
+              <div className="flex items-center gap-2 border-t border-slate-800/70 py-1 font-mono text-[11px]">
+                <span className="w-40 shrink-0 text-slate-300">{PROVIDER_ORDER.length + 2}. Onboard clinical engine</span>
+                <span className="text-emerald-300">always available · 0 ms</span>
+              </div>
+              <p className="mt-1 font-mono text-[10px] text-slate-500">Open a provider tile to paste a browser key, browse its models, or pin one.</p>
+            </div>
+          )}
+
+          {meta && (
+            <>
+              <div>
+                <label htmlFor="zg-ai-key" className="font-mono text-xs font-bold uppercase tracking-widest text-slate-400">
+                  Browser API Key {serverOn(tab) ? '(optional — Vercel env key already active)' : '(optional)'}
+                </label>
+                <input id="zg-ai-key" type="password" autoComplete="off" spellCheck={false} value={draft.keys[tab]} onChange={(e) => setKey(e.target.value)}
+                  placeholder={'Paste ' + meta.label + ' API key… (' + meta.keyHint + ')'}
+                  className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-2 font-mono text-xs text-slate-200 placeholder-slate-600 outline-none focus:border-sky-500/60" />
+              </div>
+              {detected && detected === tab && (
+                <p className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-2 font-mono text-xs text-emerald-300">
+                  ✅ Key format matches {meta.label}.
+                </p>
+              )}
+              {detected && detected !== tab && (
+                <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2 font-mono text-xs text-amber-300">
+                  🔎 Key prefix detected as <b>{PROVIDERS[detected].label}</b> — it will be auto-routed there on save.
+                </p>
+              )}
+              {!detected && browserKey.trim() && (
+                <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2 font-mono text-xs text-amber-300">
+                  ⚠️ {meta.label} keys normally start with “{meta.keyPrefix}”.
+                </p>
+              )}
+
+              <div>
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <p className="font-mono text-xs font-bold uppercase tracking-widest text-slate-400">
+                    Available Models{models.length ? ' — ' + models.length : ''}
+                  </p>
+                  <span className="truncate font-mono text-[10px] text-slate-500">
+                    {loading ? '⏳ loading catalog…' : catalog.source ? 'source: ' + catalog.source : ''}
+                  </span>
+                </div>
+                {models.length > 8 && (
+                  <input type="search" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter models…" aria-label="Filter models"
+                    className="mb-1.5 w-full rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-1.5 font-mono text-xs text-slate-200 placeholder-slate-600 outline-none focus:border-sky-500/60" />
+                )}
+                <div className="max-h-56 space-y-1.5 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950/60 p-1.5">
+                  <button type="button" onClick={() => edit({ model: '' })} aria-pressed={!pinned}
+                    className={'flex w-full items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-left transition-all ' + (
+                      !pinned ? 'border-2 border-emerald-400 bg-emerald-950/70 shadow-lg' : 'border-slate-700 bg-slate-900/60 hover:border-slate-500')}>
+                    <span className="min-w-0 flex-1 font-mono text-sm font-bold text-white">
+                      🔀 AUTOMATIC <span className="font-normal text-slate-400">— failover picks a light, quota-safe model per query</span>
+                    </span>
+                    {!pinned && <span className="shrink-0 rounded bg-emerald-400 px-1.5 py-0.5 font-mono text-[10px] font-bold text-emerald-950">[✓ SELECTED]</span>}
+                  </button>
+                  {visible.slice(0, MODEL_ROW_LIMIT).map((m) => {
+                    const selected = pinned === m.id;
+                    return (
+                      <button type="button" key={m.id} onClick={() => edit({ model: selected ? '' : m.id })} aria-pressed={selected} title={m.name || m.id}
+                        className={'flex w-full items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-left transition-all ' + (
+                          selected ? 'border-2 border-emerald-400 bg-emerald-950/70 shadow-lg' : 'border-slate-700 bg-slate-900/60 hover:border-slate-500')}>
+                        <span className="min-w-0 flex-1 truncate font-mono text-sm font-bold text-white">{m.id}</span>
+                        <span className="flex shrink-0 items-center gap-1">
+                          {m.recommended ? tag('AUTO #' + m.recommended, 'bg-sky-500/20 text-sky-300') : null}
+                          {m.free ? tag('FREE', 'bg-emerald-500/20 text-emerald-300') : null}
+                          {m.light ? tag('LIGHT', 'bg-slate-700/70 text-slate-300') : null}
+                          {m.ctx ? <span className="hidden font-mono text-[9px] text-slate-500 sm:inline">{fmtCtx(m.ctx)}</span> : null}
+                          {selected && <span className="rounded bg-emerald-400 px-1.5 py-0.5 font-mono text-[10px] font-bold text-emerald-950">[✓ PINNED]</span>}
+                        </span>
+                      </button>
+                    );
+                  })}
+                  {!loading && visible.length > MODEL_ROW_LIMIT && (
+                    <p className="px-1 font-mono text-[10px] text-slate-500">+{visible.length - MODEL_ROW_LIMIT} more — type in the filter to narrow the list.</p>
+                  )}
+                  {!loading && models.length > 0 && visible.length === 0 && (
+                    <p className="px-1 font-mono text-[10px] text-slate-500">No model matches “{filter}”.</p>
+                  )}
+                </div>
+                {catalog.key === catalogKey && catalog.note && (
+                  <p className={'mt-1 font-mono text-[10px] ' + (catalog.state === 'error' ? 'text-rose-300' : 'text-amber-300/80')}>{catalog.note}</p>
+                )}
+                {pinned && !loading && !pinnedListed && (
+                  <p className="mt-1 font-mono text-[10px] text-amber-300">Pinned model is not in this catalog — it is tried first, then automatic failover takes over.</p>
+                )}
+                <p className="mt-1 font-mono text-[10px] text-slate-500">
+                  AUTO #n = failover order · click a row to pin it, click again (or AUTOMATIC) to unpin · selected: <span className="text-emerald-400">{pinned || 'automatic'}</span>
+                </p>
+                <div className="mt-1.5">
+                  <label htmlFor="zg-ai-model" className="font-mono text-xs font-bold uppercase tracking-widest text-slate-400">Custom Model ID (optional)</label>
+                  <input id="zg-ai-model" type="text" spellCheck={false} value={draft.model} onChange={(e) => edit({ model: e.target.value.trim() })}
+                    placeholder="blank = automatic"
+                    className="mt-1 w-full rounded-lg border border-emerald-700/60 bg-slate-950/80 px-3 py-2 font-mono text-xs font-bold text-emerald-300 placeholder-slate-600 outline-none focus:border-emerald-500/70" />
+                </div>
+              </div>
+            </>
+          )}
+
+          {tab !== 'onboard' && (
+            <label className="flex items-start gap-2 rounded-lg border border-slate-700/60 bg-slate-900/60 p-2 font-mono text-xs text-slate-400">
+              <input type="checkbox" checked={draft.publicRelay} onChange={(e) => edit({ publicRelay: e.target.checked })} className="mt-0.5 accent-sky-500" />
+              <span>Allow the keyless Pollinations relay as a last resort. Off by default: it serves one request per visitor IP about every 30 s, so it cannot sustain a conversation.</span>
+            </label>
+          )}
+
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={runTest} disabled={!canTest || (test && test.state === 'wait')}
+              className="shrink-0 rounded-lg border border-amber-500/50 bg-amber-500/15 px-3 py-2 font-mono text-xs font-bold text-amber-300 transition-all hover:bg-amber-500/25 disabled:opacity-40">
+              ⚡ Test API Connection
+            </button>
+            {test && (
+              <p className={'min-w-0 flex-1 break-words font-mono text-xs font-bold ' + (test.state === 'ok' ? 'text-emerald-300' : test.state === 'fail' ? 'text-rose-300' : 'text-slate-400')}>
+                {test.msg}
+              </p>
+            )}
+          </div>
+
+          <p className="rounded-lg border border-slate-700/60 bg-slate-900/60 p-2 font-mono text-xs text-slate-400">
+            Active on save: <span className="text-sky-300">{tile.badge}{meta ? ' · ' + (pinned || 'automatic model') : ''}</span> · Vercel env keys stay on the server; pasted keys are stored in this browser only. If every live link fails, MED-AI answers instantly from the onboard clinical engine.
+          </p>
         </div>
 
         <div className="flex justify-end gap-2 border-t border-slate-800 bg-slate-900/50 p-4">
           <button type="button" onClick={closeModal} className="rounded-lg border border-slate-700 px-3 py-2 font-mono text-xs text-slate-300 hover:border-slate-500">Cancel</button>
-          <button type="button" onClick={() => { cancelWork(); setEngine(draft); onClose(); }}
+          <button type="button" onClick={() => { cancelTest(); onSave(routeDraftKeys(draft)); }}
             className="rounded-lg border border-emerald-500/50 bg-emerald-500/15 px-3 py-2 font-mono text-xs font-bold text-emerald-300 hover:bg-emerald-500/25">Save Engine</button>
         </div>
       </div>
@@ -2077,53 +1987,98 @@ function AISettingsModalContent({ onClose, engine, setEngine }) {
 }
 
 
+const ChatBubble = React.memo(function ChatBubble({ msg }) {
+  const ai = msg.role === 'ai';
+  return (
+    <div className={'max-w-[92%] rounded-xl border p-3 text-sm leading-snug ' + (
+      ai ? 'border-sky-500/30 bg-sky-500/5 text-slate-200' : 'ml-auto border-rose-500/40 bg-rose-950/30 text-rose-200')}>
+      {ai && (
+        <p className="mb-1 flex min-w-0 items-center gap-1 font-mono text-xs font-bold tracking-widest text-sky-400">
+          <Sparkles size={11} className="shrink-0" /> <span className="shrink-0">MED-AI {sourceBadge(msg.source || 'onboard')}</span>
+          {msg.model ? <span className="min-w-0 truncate font-normal tracking-normal text-sky-400/60">· {msg.model}</span> : null}
+          {msg.streaming ? <span className="ml-1 h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-sky-400" aria-label="streaming" /> : null}
+        </p>
+      )}
+      <div dir={isArabic(msg.text) ? 'rtl' : 'ltr'} className="space-y-0.5 text-sm leading-relaxed text-slate-200">{renderFormattedChat(msg.text)}</div>
+    </div>
+  );
+});
+
+const CHAT_REPLY_TOKENS = 640;
+const AUTO_REPLY_TOKENS = 450;
+
+function scenarioTitleOf(ctx) {
+  const s = ctx && (ctx.scenario || ctx.activeScenario);
+  return (s && (s.name || s.title || s.label)) || (ctx && ctx.scenarioId) || 'Emergency';
+}
+
 function AIChat({ ctx }) {
-  const [messages, setMessages] = useState([{
+  const [messages, setMessages] = useState(() => [{
+    id: 'greeting',
     role: 'ai',
     text: 'MED-AI online. Earth is ' + NASA_DATA_CONFIG.comm.label + ' away at light speed — I am your autonomous medical officer. Ask anything, or press the microphone to speak hands-free.',
   }]);
   const [input, setInput] = useState('');
   const [thinking, setThinking] = useState(false);
+  const [progress, setProgress] = useState('');
   const [listening, setListening] = useState(false);
+  const [listenLang, setListenLang] = useState('en-US');
   const [voiceOn, setVoiceOn] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [engine, setEngine] = useState(() => {
-    try {
-      const saved = localStorage.getItem('zgp_ai_engine');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed && AI_ENGINES.providers.some((p) => p.id === parsed.provider)) {
-          return {
-            provider: parsed.provider,
-            key: DEFAULT_KEYS[parsed.provider] || (typeof parsed.key === 'string' ? parsed.key.trim() : ''),
-            model: typeof parsed.model === 'string' ? parsed.model.trim() : '',
-          };
-        }
-      }
-    } catch { /* Storage may be disabled or contain malformed data. */ }
-    const configured = ['groq', 'gemini', 'openrouter'].find((provider) => DEFAULT_KEYS[provider]);
-    return { provider: configured || 'groq', key: DEFAULT_KEYS[configured] || '', model: configured ? PROVIDER_ROUTING[configured].model : 'llama-3.3-70b-versatile' };
-  });
+  // The saved engine is the single source of truth for the badge and every query.
+  const [engine, setEngine] = useState(loadEngine);
+  const [serverStatus, setServerStatus] = useState(peekServerStatus);
+  const [lastRoute, setLastRoute] = useState(null);
 
   const scrollRef = useRef(null);
   const recognitionRef = useRef(null);
   const spokenRef = useRef(0);
-  const lastScenarioRef = useRef(ctx.crew.id + ':nominal');
   const ctxRef = useRef(ctx);
-  ctxRef.current = ctx;
   const engineRef = useRef(engine);
-  engineRef.current = engine;
   const messagesRef = useRef(messages);
-  messagesRef.current = messages;
   const queryRef = useRef(null);
   const autoTimerRef = useRef(null);
   const busyRef = useRef(false);
   const mountedRef = useRef(false);
   const languageRef = useRef('');
   const sendRef = useRef(null);
-  const [responseSource, setResponseSource] = useState('onboard');
-  const [responseModel, setResponseModel] = useState('');
+  const idRef = useRef(0);
 
+  useLayoutEffect(() => {
+    ctxRef.current = ctx;
+    engineRef.current = engine;
+    messagesRef.current = messages;
+  });
+
+  // Crew or emergency changed: post the alarm / nominal notice during render
+  // (React's "adjust state when a prop changes" pattern); side effects run below.
+  const contextKey = ctx.crew.id + ':' + ctx.scenarioId;
+  const [seenContext, setSeenContext] = useState(() => ({ key: ctx.crew.id + ':nominal', seq: 0 }));
+  if (seenContext.key !== contextKey) {
+    const seq = seenContext.seq + 1;
+    setSeenContext({ key: contextKey, seq });
+    setListening(false);
+    setProgress('');
+    if (ctx.scenarioId === 'nominal') {
+      setMessages((m) => [...m, {
+        id: 'ctx-' + seq,
+        role: 'ai',
+        source: 'onboard',
+        text: '**[AUTONOMOUS STATUS // NOMINAL RESTORED]** All crew vitals and cabin environmental parameters have stabilized within NASA-STD-3001 flight-rule limits. Resuming passive biometric watch.',
+      }]);
+      setThinking(false);
+      setLastRoute({ provider: 'onboard', model: '', via: 'local' });
+    } else {
+      setMessages((m) => [...m, {
+        id: 'ctx-' + seq,
+        role: 'user',
+        text: '[AUTONOMOUS TELEMETRY ALARM // ' + String(scenarioTitleOf(ctx)).toUpperCase() + '] Critical biometric threshold breach detected — initiating autonomous MED-AI intervention.',
+      }]);
+      setThinking(true);
+    }
+  }
+
+  // Never sets state synchronously: an aborted query finalises its own message.
   const cancelQuery = useCallback(() => {
     clearTimeout(autoTimerRef.current);
     autoTimerRef.current = null;
@@ -2141,10 +2096,18 @@ function AIChat({ ctx }) {
   const cancelSpeech = useCallback(() => {
     try { window.speechSynthesis?.cancel(); } catch { /* Optional browser API. */ }
   }, []);
+  const pushNotice = useCallback((text) => {
+    idRef.current += 1;
+    const id = 'm-' + idRef.current;
+    setMessages((m) => [...m, { id, role: 'ai', text }]);
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
+    let alive = true;
+    getServerStatus().then((status) => { if (alive) setServerStatus(status); });
     return () => {
+      alive = false;
       mountedRef.current = false;
       cancelQuery();
       stopRecognition();
@@ -2152,19 +2115,20 @@ function AIChat({ ctx }) {
     };
   }, [cancelQuery, stopRecognition, cancelSpeech]);
 
-  useEffect(() => {
-    cancelQuery();
-    stopRecognition();
-    cancelSpeech();
-    setThinking(false);
-    setListening(false);
-    return () => { cancelQuery(); stopRecognition(); cancelSpeech(); };
-  }, [ctx.crew.id, ctx.scenarioId, ctx.checkedSteps, engine, cancelQuery, stopRecognition, cancelSpeech]);
+  const { scenario, scenarioId, checkedSteps } = ctx;
+  const pred = useMemo(() => computePrediction({ scenario, scenarioId, checkedSteps }), [scenario, scenarioId, checkedSteps]);
+  const engineTile = AI_ENGINES.providers.find((p) => p.id === engine.provider) || AI_ENGINES.providers[0];
 
-  const pred = useMemo(() => computePrediction(ctx), [ctx.scenario, ctx.scenarioId, ctx.checkedSteps]);
-  const activeProvider = AI_ENGINES.providers.find((p) => p.id === engine.provider) || AI_ENGINES.providers[0];
-  const sourceBadge = (source) => source === 'pollinations' ? 'Pollinations Live' : (AI_ENGINES.providers.find((p) => p.id === source) || AI_ENGINES.providers.find((p) => p.id === 'onboard')).badge;
-  const modelLabel = responseModel ? ' · ' + responseModel : '';
+  // Unknown proxy status (slow cold start) must not be shown as "no keys".
+  const statusKnown = Boolean(serverStatus && serverStatus.available !== null);
+  let engineBadge = engineTile.badge;
+  if (engine.provider === 'auto') {
+    const live = Boolean((serverStatus && serverStatus.any) || hasBrowserKeys(engine) || engine.publicRelay);
+    engineBadge += statusKnown && !live ? ' · no live keys → Onboard' : ' · auto model';
+  } else if (engine.provider !== 'onboard') {
+    const keyed = Boolean(engine.keys[engine.provider] || (serverStatus && serverStatus.providers[engine.provider]));
+    engineBadge += ' · ' + (engine.model || 'auto model') + (statusKnown && !keyed ? ' · no key → failover' : '');
+  }
 
   // Clean medical & markdown text and speak in sentence chunks (prevents Chrome 15s cutoff bug)
   const speakText = useCallback((rawText) => {
@@ -2207,148 +2171,160 @@ function AIChat({ ctx }) {
     } catch { /* Optional browser API — a defined-but-broken speech engine must not break the app. */ }
   }, []);
 
-  // Browser storage is optional. Never persist environment-provided keys.
+  const streamingNow = messages.length > 0 && Boolean(messages[messages.length - 1].streaming);
   useEffect(() => {
     try {
-      localStorage.setItem('zgp_ai_engine', JSON.stringify({ ...engine, key: engine.key === DEFAULT_KEYS[engine.provider] ? '' : engine.key }));
-    } catch { /* Browser storage is optional. */ }
-  }, [engine]);
+      scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: streamingNow ? 'auto' : 'smooth' });
+    } catch { /* Reduced browser implementations. */ }
+  }, [messages, thinking, streamingNow]);
 
-  useEffect(() => {
-    try { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' }); } catch { /* Reduced browser implementations. */ }
-  }, [messages, thinking]);
-
-  // Speak new AI messages aloud when Voice Output is ON
+  // Speak new AI messages aloud when Voice Output is ON (only once a stream has finished).
   useEffect(() => {
     const lastIdx = messages.length - 1;
     const last = messages[lastIdx];
-    if (voiceOn && last && last.role === 'ai' && lastIdx > spokenRef.current) {
+    if (voiceOn && last && last.role === 'ai' && !last.streaming && lastIdx > spokenRef.current) {
       spokenRef.current = lastIdx;
       speakText(last.text);
     }
   }, [messages, voiceOn, speakText]);
 
-  // Configured providers (one 3.5 s window) -> Pollinations (6 s) -> onboard.
-  const runAutonomousOrLiveQuery = useCallback((promptText, historySnapshot, currentCtx, onDone) => {
+  /* One MED-AI answer: Vercel-key proxy → browser keys → (opt-in relay) → onboard.
+   * Live answers stream into a single message; a dropped link keeps the streamed
+   * text and the onboard engine completes the answer. */
+  const runQuery = useCallback((promptText, historySnapshot, currentCtx, maxTokens) => {
     cancelQuery();
     const controller = new AbortController();
     queryRef.current = controller;
     busyRef.current = true;
-    const valid = () => mountedRef.current && !controller.signal.aborted
-      && queryRef.current === controller && engineRef.current === engine
-      && ctxRef.current.crew.id === currentCtx.crew.id
-      && ctxRef.current.scenarioId === currentCtx.scenarioId
-      && ctxRef.current.checkedSteps === currentCtx.checkedSteps;
-    const finish = (reply, source, model = '') => {
-      if (!valid()) return;
-      queryRef.current = null;
-      busyRef.current = false;
-      setResponseSource(source);
-      setResponseModel(model);
-      onDone(reply, source);
-      controller.abort();
-    };
-    const offline = () => finish(buildAIResponse(promptText, currentCtx), 'onboard');
-    if (engine.provider === 'onboard' || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
-      offline();
-      return;
-    }
-
-    const sys =
-      buildSystemPrompt(currentCtx) +
-      '\n\nOFFICIAL CHALLENGE RESOURCES & SCIENTIFIC GROUNDING:\n' +
-      '1. NASA HRP 5 Hazards (https://www.nasa.gov/hrp/hazards/): Space Radiation, Isolation/Confinement, Distance from Earth (14m 28s comm delay requiring autonomous AI), Gravity Fields, and Hostile/Closed Environments.\n' +
-      '2. NASA HRP Risks (https://www.nasa.gov/hrp/risks/): Spaceflight Associated Neuro-ocular Syndrome (SANS), Cardiovascular Deconditioning, Acute Hypoxia, and Circadian Desynchrony.\n' +
-      '3. NASA Ongoing HRP Research (https://www.nasa.gov/hrp/ongoing-hrp-research/): NASA Standard Measures, ARCHeR (sleep/HRV), and CIPHER multi-organ studies.\n' +
-      '4. CSA Monitoring Radiation (https://www.asc-csa.gc.ca/eng/news/articles/2026/2026-02-26-monitoring-radiation-astronaut-health.asp): Canadian Active Neutron Spectrometer (CANS) and Bubble Detector real-time mSv/day dosimetry.\n' +
-      '5. CSA Space Science & Earth Dual-Use (https://www.asc-csa.gc.ca/eng/iss/science/why-do-we-conduct-science-experiments-in-space.asp): CSA Bio-Monitor Smart Shirt + AI platform and CARDIOBREATH cardiovascular/respiratory tracking for astronauts and remote Earth patients.\n' +
-      'LANGUAGE & COMPLETION RULE: Always reply in the EXACT SAME LANGUAGE used by the user (Arabic if Arabic, English if English). Cite relevant NASA HRP, CSA, and NASA-STD-3001 standards naturally and finish all sentences completely.';
-    const primaryKey = DEFAULT_KEYS[engine.provider] || String(engine.key || '').trim();
-    const primaryProvider = detectProviderFromKey(primaryKey) || engine.provider || 'groq';
-
-    const candidates = [
-      { provider: primaryProvider, key: primaryKey, model: engine.model || '' },
-      { provider: 'groq', key: DEFAULT_KEYS.groq, model: '' },
-      { provider: 'openrouter', key: DEFAULT_KEYS.openrouter, model: '' },
-      { provider: 'gemini', key: DEFAULT_KEYS.gemini, model: '' },
-    ].filter((c, idx, arr) => c.key && arr.findIndex((x) => x.provider === c.provider && x.key === c.key) === idx);
-
-    void (async () => {
-      try {
-        const result = await firstSuccessful(candidates, async (candidate, signal) => ({
-          reply: await callLiveAI(candidate, sys, historySnapshot, promptText, undefined, signal),
-          source: candidate.provider,
-          model: candidate.model || PROVIDER_ROUTING[candidate.provider]?.model || '',
-        }), controller.signal);
-        finish(result.reply, result.source, result.model);
-        return;
-      } catch {
-        if (!valid()) return;
+    const eng = engineRef.current;
+    const newId = () => { idRef.current += 1; return 'm-' + idRef.current; };
+    const current = () => mountedRef.current && !controller.signal.aborted && queryRef.current === controller;
+    const release = () => {
+      if (queryRef.current === controller) {
+        queryRef.current = null;
+        busyRef.current = false;
       }
-      if (typeof navigator !== 'undefined' && navigator.onLine === false) { offline(); return; }
-      try {
-        const reply = await callPollinations(sys, historySnapshot, promptText, controller.signal);
-        finish(reply, 'pollinations', 'openai');
-      } catch {
-        if (valid()) offline();
-      }
-    })();
-  }, [engine, cancelQuery]);
-
-  // Autonomous Emergency Trigger: Fires automatically whenever a space emergency button is clicked
-  const currentScenarioId = ctx.scenarioId;
-
-  useEffect(() => {
-    const contextKey = ctx.crew.id + ':' + currentScenarioId;
-    if (contextKey === lastScenarioRef.current) return;
-    lastScenarioRef.current = contextKey;
-
-    const latestCtx = ctxRef.current;
-    const sObj = latestCtx && (latestCtx.scenario || latestCtx.activeScenario);
-    const scenTitle = (sObj && (sObj.name || sObj.title || sObj.label)) || currentScenarioId;
-
-    if (currentScenarioId === 'nominal') {
-      setMessages((m) => [
-        ...m,
-        {
-          role: 'ai',
-          source: 'onboard',
-          text: '**[AUTONOMOUS STATUS // NOMINAL RESTORED]** All crew vitals and cabin environmental parameters have stabilized within NASA-STD-3001 flight-rule limits. Resuming passive biometric watch.',
-        },
-      ]);
-      setResponseSource('onboard');
-      setResponseModel('');
       setThinking(false);
+      setProgress('');
+    };
+    const answerOnboard = (reason) => {
+      release();
+      const id = newId();
+      setMessages((m) => [...m, { id, role: 'ai', source: 'onboard', text: buildAIResponse(promptText, currentCtx) }]);
+      setLastRoute({ provider: 'onboard', model: '', via: 'local', reason: reason || '' });
+    };
+    if (eng.provider === 'onboard' || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+      answerOnboard(eng.provider === 'onboard' ? '' : 'Browser offline');
       return;
     }
 
+    let streamId = null;
+    let text = '';
+    let flushTimer = null;
+    const flush = () => {
+      flushTimer = null;
+      if (streamId === null || !mountedRef.current) return;
+      const id = streamId;
+      const snapshot = text;
+      setMessages((m) => m.map((x) => (x.id === id ? { ...x, text: snapshot } : x)));
+    };
+    const finalize = (patch) => {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+      const id = streamId;
+      setMessages((m) => m.map((x) => (x.id === id ? { ...x, ...patch, streaming: false } : x)));
+    };
+    const onDelta = (chunk, meta) => {
+      if (!current()) return;
+      text += chunk;
+      if (streamId === null) {
+        streamId = newId();
+        const id = streamId;
+        const first = text;
+        setThinking(false);
+        setProgress('');
+        setMessages((m) => [...m, { id, role: 'ai', source: (meta && meta.provider) || 'onboard', model: (meta && meta.model) || '', text: first, streaming: true }]);
+      } else if (!flushTimer) {
+        flushTimer = setTimeout(flush, 60);
+      }
+    };
+    const onEvent = (e) => {
+      if (!current() || streamId !== null) return;
+      if (e.type === 'attempt') {
+        setProgress(providerLabel(e.provider) + ' · ' + e.model + (e.source === 'server' ? ' · Vercel key' : ' · browser key'));
+      } else if (e.type === 'failover' || e.type === 'model-skip') {
+        setProgress('failover → next ' + (e.type === 'model-skip' ? 'model' : 'provider') + '…');
+      }
+    };
+
+    askMedAI({
+      engine: eng,
+      system: buildLiveSystemPrompt(currentCtx),
+      history: historySnapshot,
+      prompt: promptText,
+      maxTokens,
+      signal: controller.signal,
+      onDelta,
+      onEvent,
+    }).then((result) => {
+      if (!mountedRef.current) return;
+      if (!current()) {
+        if (streamId !== null) finalize({ text: text.trim() || result.text });
+        return;
+      }
+      release();
+      if (streamId === null) {
+        const id = newId();
+        setMessages((m) => [...m, { id, role: 'ai', source: result.provider, model: result.model || '', text: result.text }]);
+      } else {
+        finalize({ text: result.text, source: result.provider, model: result.model || '' });
+      }
+      setLastRoute({ provider: result.provider, model: result.model || '', via: result.via });
+      if (result.via === 'server') getServerStatus().then((status) => { if (mountedRef.current) setServerStatus(status); });
+    }).catch((err) => {
+      if (!mountedRef.current) return;
+      if (!current()) {
+        // Superseded or cancelled: keep whatever already streamed.
+        if (streamId !== null) finalize({ text: text.trim() });
+        return;
+      }
+      const reason = describeFailure(err);
+      if (streamId !== null) {
+        release();
+        const notice = isArabic(promptText)
+          ? '**[انقطع الاتصال المباشر — يكمل المحرك الطبي الداخلي]**'
+          : '**[LINK DROPPED — ONBOARD ENGINE CONTINUES]**';
+        finalize({ text: (text.trim() ? text.trim() + '\n\n---\n' : '') + notice + '\n' + buildAIResponse(promptText, currentCtx) });
+        setLastRoute({ provider: 'onboard', model: '', via: 'local', reason });
+        return;
+      }
+      if (err && err.configured) console.info('[MED-AI] live link unavailable — onboard engine answered:', reason);
+      answerOnboard(reason);
+    });
+  }, [cancelQuery]);
+
+  // Autonomous Emergency Trigger: fires whenever the crew or emergency changes (not on nominal).
+  useEffect(() => {
+    cancelQuery();
+    stopRecognition();
+    cancelSpeech();
+    const fresh = ctxRef.current;
+    if (!fresh || fresh.scenarioId === 'nominal') return undefined;
+    busyRef.current = true;
+    const crewId = fresh.crew.id;
+    const firedScenario = fresh.scenarioId;
     const autoPrompt =
       'AUTONOMOUS EMERGENCY TRIGGER: ' +
-      scenTitle +
+      scenarioTitleOf(fresh) +
       ' detected. Analyze current abnormal crew telemetry, identify critical organ risks, and issue immediate step-by-step autonomous medical countermeasures under NASA-STD-3001. Keep response concise, complete, and under 180 words.';
-
-    setMessages((m) => [
-      ...m,
-      {
-        role: 'user',
-        text: '[AUTONOMOUS TELEMETRY ALARM // ' + String(scenTitle).toUpperCase() + '] Critical biometric threshold breach detected — initiating autonomous MED-AI intervention.',
-      },
-    ]);
-    setThinking(true);
-    busyRef.current = true;
-
     autoTimerRef.current = setTimeout(() => {
       autoTimerRef.current = null;
-      const freshCtx = ctxRef.current;
-      if (!mountedRef.current || freshCtx.crew.id !== latestCtx.crew.id || freshCtx.scenarioId !== currentScenarioId) return;
-      runAutonomousOrLiveQuery(autoPrompt, [], freshCtx, (reply, source) => {
-        setMessages((m) => [...m, { role: 'ai', text: reply, source }]);
-        setThinking(false);
-      });
+      const now = ctxRef.current;
+      if (!mountedRef.current || now.crew.id !== crewId || now.scenarioId !== firedScenario) return;
+      runQuery(autoPrompt, [], now, AUTO_REPLY_TOKENS);
     }, 1400);
-
     return cancelQuery;
-  }, [ctx.crew.id, currentScenarioId, runAutonomousOrLiveQuery, cancelQuery]);
+  }, [contextKey, runQuery, cancelQuery, stopRecognition, cancelSpeech]);
 
   const send = useCallback((text) => {
     const q = String(text || '').trim();
@@ -2357,16 +2333,24 @@ function AIChat({ ctx }) {
     languageRef.current = q;
     stopRecognition();
     setListening(false);
-    setMessages((m) => [...m, { role: 'user', text: q }]);
+    idRef.current += 1;
+    const id = 'm-' + idRef.current;
+    setMessages((m) => [...m, { id, role: 'user', text: q }]);
     setInput('');
     setThinking(true);
+    runQuery(q, snapshot, ctxRef.current, CHAT_REPLY_TOKENS);
+  }, [runQuery, stopRecognition]);
+  useLayoutEffect(() => { sendRef.current = send; }, [send]);
 
-    runAutonomousOrLiveQuery(q, snapshot, ctxRef.current, (reply, source) => {
-      setMessages((m) => [...m, { role: 'ai', text: reply, source }]);
-      setThinking(false);
-    });
-  }, [runAutonomousOrLiveQuery, stopRecognition]);
-  sendRef.current = send;
+  const handleSaveEngine = useCallback((next) => {
+    const saved = saveEngine(next);
+    resetHealth();
+    setEngine(saved);
+    setLastRoute(null);
+    setSettingsOpen(false);
+    getServerStatus({ force: true }).then((status) => { if (mountedRef.current) setServerStatus(status); });
+  }, []);
+  const closeSettings = useCallback(() => setSettingsOpen(false), []);
 
   // Improved Microphone Input: Live transcript preview + auto-send when finished speaking
   const startVoice = () => {
@@ -2381,7 +2365,7 @@ function AIChat({ ctx }) {
       : (typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition));
 
     if (!SpeechRec) {
-      setMessages((m) => [...m, { role: 'ai', text: 'Voice input requires Chrome or Edge (Web Speech API). Please use Chrome/Edge or type your question below.' }]);
+      pushNotice('Voice input requires Chrome or Edge (Web Speech API). Please use Chrome/Edge or type your question below.');
       return;
     }
 
@@ -2426,11 +2410,12 @@ function AIChat({ ctx }) {
       stopRecognition();
       setListening(false);
       if (e && (e.error === 'not-allowed' || e.error === 'service-not-allowed')) {
-        setMessages((m) => [...m, { role: 'ai', text: 'Microphone access was blocked by the browser. Click the lock/tune icon next to the URL bar and allow Microphone access.' }]);
+        pushNotice('Microphone access was blocked by the browser. Click the lock/tune icon next to the URL bar and allow Microphone access.');
       }
     };
 
     recognitionRef.current = rec;
+    setListenLang(rec.lang);
     setListening(true);
     try { rec.start(); } catch { stopRecognition(); setListening(false); }
   };
@@ -2442,11 +2427,15 @@ function AIChat({ ctx }) {
     if (!next) {
       cancelSpeech();
     } else {
-      const lastAi = [...messages].reverse().find((m) => m.role === 'ai');
+      const lastAi = [...messages].reverse().find((m) => m.role === 'ai' && !m.streaming);
       spokenRef.current = messages.length - 1;
       if (lastAi) speakText(lastAi.text);
     }
   };
+
+  const thinkingLabel = progress
+    ? '⇄ ' + progress + ' — reasoning over live telemetry…'
+    : (engine.provider === 'auto' ? '🔀 MED-AI' : engineTile.badge) + ' reasoning over live telemetry…';
 
   return (
     <section className="flex flex-col rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
@@ -2454,9 +2443,15 @@ function AIChat({ ctx }) {
         <h2 className="flex items-center gap-2 font-mono text-xs font-bold uppercase tracking-[0.2em] text-slate-400">
           <Bot size={15} className="text-sky-400" /> {NASA_DATA_CONFIG.ai.officerName}
         </h2>
-        <span className="rounded-full border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 font-mono text-xs font-bold text-sky-300">
-          {sourceBadge(responseSource)}{modelLabel}
+        <span className="max-w-full truncate rounded-full border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 font-mono text-xs font-bold text-sky-300" title="Configured MED-AI engine">
+          {engineBadge}
         </span>
+        {lastRoute && (
+          <span className="max-w-full truncate rounded-full border border-slate-700 bg-slate-950/70 px-2 py-0.5 font-mono text-[10px] text-slate-400"
+            title={lastRoute.reason ? 'Last answer: ' + lastRoute.reason : 'Engine that produced the last answer'}>
+            ↳ {sourceBadge(lastRoute.provider)}{lastRoute.model ? ' · ' + lastRoute.model : ''}{lastRoute.via === 'server' ? ' · Vercel key' : lastRoute.via === 'browser' ? ' · browser key' : ''}
+          </span>
+        )}
         <button onClick={() => setSettingsOpen(true)}
           className="ml-auto flex items-center gap-1.5 rounded-lg border border-slate-600 bg-slate-800/60 px-2.5 py-1.5 font-mono text-xs font-bold text-slate-200 transition-all hover:border-sky-500/50 hover:text-sky-300">
           Configure AI Engine
@@ -2466,21 +2461,11 @@ function AIChat({ ctx }) {
       <PredictiveBanner pred={pred} />
 
       <div ref={scrollRef} className="h-64 space-y-2 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950/70 p-3">
-        {messages.map((msg, i) => (
-          <div key={i} className={'max-w-[92%] rounded-xl border p-3 text-sm leading-snug ' + (
-            msg.role === 'ai' ? 'border-sky-500/30 bg-sky-500/5 text-slate-200' : 'ml-auto border-rose-500/40 bg-rose-950/30 text-rose-200')}>
-            {msg.role === 'ai' && (
-              <p className="mb-1 flex items-center gap-1 font-mono text-xs font-bold tracking-widest text-sky-400">
-                <Sparkles size={11} /> MED-AI {sourceBadge(msg.source || 'onboard')}
-              </p>
-            )}
-            <div dir={isArabic(msg.text) ? 'rtl' : 'ltr'} className="space-y-0.5 text-sm leading-relaxed text-slate-200">{renderFormattedChat(msg.text)}</div>
-          </div>
-        ))}
+        {messages.map((msg) => <ChatBubble key={msg.id} msg={msg} />)}
         {thinking && (
           <div className="flex items-center gap-2 font-mono text-xs text-slate-400">
-            <span className="h-2 w-2 animate-ping rounded-full bg-sky-400" />
-            {activeProvider.badge + ' reasoning over live telemetry…'}
+            <span className="h-2 w-2 shrink-0 animate-ping rounded-full bg-sky-400" />
+            <span className="min-w-0 truncate">{thinkingLabel}</span>
           </div>
         )}
       </div>
@@ -2496,7 +2481,7 @@ function AIChat({ ctx }) {
 
       <form onSubmit={(e) => { e.preventDefault(); send(input); }} className="mt-2 flex gap-2">
         <input value={input} onChange={(e) => { setInput(e.target.value); if (e.target.value.trim()) languageRef.current = e.target.value; }}
-          placeholder={listening ? (speechLanguage(input.trim() || languageRef.current).startsWith('ar') ? 'جارٍ الاستماع... تحدث الآن بالعربية' : 'Listening... speak now in English') : 'Ask MED-AI about crew health…'}
+          placeholder={listening ? (listenLang.startsWith('ar') ? 'جارٍ الاستماع... تحدث الآن بالعربية' : 'Listening... speak now in English') : 'Ask MED-AI about crew health…'}
           className="flex-1 rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-2 font-mono text-sm text-slate-200 placeholder-slate-600 outline-none focus:border-sky-500/60" />
         <button type="button" onClick={startVoice} title="Voice input"
           className={'flex items-center gap-1.5 rounded-lg border px-2.5 py-2 font-mono text-xs font-bold transition-all ' + (
@@ -2549,7 +2534,7 @@ function AIChat({ ctx }) {
           ))}
         </div>
       </div>
-      <AISettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} engine={engine} setEngine={setEngine} />
+      <AISettingsModal open={settingsOpen} onClose={closeSettings} engine={engine} onSave={handleSaveEngine} serverStatus={serverStatus} />
     </section>
   );
 }
