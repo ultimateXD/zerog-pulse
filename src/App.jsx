@@ -2326,7 +2326,7 @@ function AIChat({ ctx }) {
       const now = ctxRef.current;
       if (!mountedRef.current || now.crew.id !== crewId || now.scenarioId !== firedScenario) return;
       runQuery(autoPrompt, [], now, AUTO_REPLY_TOKENS);
-    }, 1400);
+    }, 5000);
     return cancelQuery;
   }, [contextKey, runQuery, cancelQuery, stopRecognition, cancelSpeech]);
 
