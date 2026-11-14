@@ -59,7 +59,7 @@ export const LIMITS = Object.freeze({
   historyChars: 900,      // per turn
   promptChars: 2000,
   systemChars: 9000,
-  maxTokens: 900,         // hard ceiling per answer
+  maxTokens: 2048,         // hard ceiling per answer
   firstTokenMs: 3500,     // every keyed request must start streaming within 3.5 s
   stallMs: 6000,          // max silence between streamed chunks
   totalMs: 25000,         // max length of one streamed answer
@@ -182,7 +182,7 @@ function geminiThinking(model) {
 export function buildRequest(providerId, { key, model, fallbacks = [], system, messages, maxTokens, stream = true, plain = false, appUrl = '', appTitle = APP_TITLE }) {
   const p = PROVIDERS[providerId];
   if (!p) throw new AttemptError('config', 'Unknown provider ' + providerId);
-  const budget = Math.max(16, Math.min(LIMITS.maxTokens, Math.round(maxTokens || 600)));
+  const budget = Math.max(16, Math.min(LIMITS.maxTokens, Math.round(maxTokens || 1800)));
   const sys = String(system || '').slice(0, LIMITS.systemChars);
 
   if (p.style === 'gemini') {
@@ -333,13 +333,13 @@ export async function* readSSE(body, signal) {
   const tryParse = (txt) => { try { return JSON.parse(txt); } catch { return undefined; } };
   // Deadlines abort `signal`; cancelling the reader guarantees a pending read()
   // settles even if the underlying body ignores the fetch signal.
-  const onAbort = () => { reader.cancel().catch(() => {}); };
+  const onAbort = () => { reader.cancel().catch(() => { }); };
   if (signal) {
     if (signal.aborted) throw abortError();
     signal.addEventListener('abort', onAbort, { once: true });
   }
   try {
-    for (;;) {
+    for (; ;) {
       const { value, done } = await reader.read();
       if (signal && signal.aborted) throw abortError();
       if (done) break;
@@ -613,7 +613,7 @@ async function attemptProvider(cand, opts) {
 
 /* Sequential, quota-safe failover across candidates ({provider, key, model,
  * source, strict}). Only one provider is billed per answer in the normal case. */
-export async function runChain({ candidates, system, messages, maxTokens, signal, health, onEvent, onDelta, fetchImpl, appUrl, appTitle, budgetMs = LIMITS.budgetMs, firstTokenMs = LIMITS.firstTokenMs, stallMs = LIMITS.stallMs, totalMs = LIMITS.totalMs }) {
+export async function runChain({ candidates, system, messages, maxTokens = LIMITS.maxTokens, signal, health, onEvent, onDelta, fetchImpl, appUrl, appTitle, budgetMs = LIMITS.budgetMs, firstTokenMs = LIMITS.firstTokenMs, stallMs = LIMITS.stallMs, totalMs = LIMITS.totalMs }) {
   const started = Date.now();
   const deadlineAt = started + budgetMs;
   const hp = health || createHealth();

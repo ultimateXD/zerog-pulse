@@ -225,7 +225,7 @@ async function askServer({ system, messages, maxTokens, budgetMs, preferred, mod
     }
     const reader = res.body.getReader();
     // A client deadline must settle a pending read() even if the body ignores the signal.
-    controller.signal.addEventListener('abort', () => { reader.cancel().catch(() => {}); }, { once: true });
+    controller.signal.addEventListener('abort', () => { reader.cancel().catch(() => { }); }, { once: true });
     const decoder = new TextDecoder();
     let buf = '';
     let done = null;
@@ -246,7 +246,7 @@ async function askServer({ system, messages, maxTokens, budgetMs, preferred, mod
         onEvent?.({ ...evt, source: 'server' });
       }
     };
-    for (;;) {
+    for (; ;) {
       const { value, done: finished } = await reader.read();
       if (controller.signal.aborted) throw abortError();
       if (finished) break;
@@ -336,7 +336,7 @@ function providerOrder(preferred, only) {
  * tier answered — attempts attached), or any kind with `emitted:true` + `partial`
  * when a link dropped after text was already streamed.
  */
-export async function askMedAI({ engine, system, history = [], prompt, maxTokens = 600, signal, onEvent, onDelta, budgetMs = LIMITS.budgetMs, only = false, strict = false, preferBrowser = false }) {
+export async function askMedAI({ engine, system, history = [], prompt, maxTokens = 1800, signal, onEvent, onDelta, budgetMs = LIMITS.budgetMs, only = false, strict = false, preferBrowser = false }) {
   throwIfAborted(signal);
   const eng = normalizeEngine(engine);
   if (eng.provider === 'onboard') throw new AttemptError('onboard', 'Onboard engine selected', { attempts: [] });

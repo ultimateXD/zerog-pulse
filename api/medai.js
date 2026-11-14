@@ -97,7 +97,7 @@ async function readBodyLimited(request, limit) {
   const reader = request.body.getReader();
   const parts = [];
   let size = 0;
-  for (;;) {
+  for (; ;) {
     const { value, done } = await reader.read();
     if (done) break;
     size += value.byteLength;
@@ -152,7 +152,7 @@ async function handlePost(request, keys) {
   const messages = sanitizeMessages(body.messages);
   if (!messages.length || messages[messages.length - 1].role !== 'user') return json(400, { error: 'A user message is required' });
   const system = typeof body.system === 'string' ? body.system.slice(0, LIMITS.systemChars) : '';
-  const maxTokens = Math.max(16, Math.min(LIMITS.maxTokens, Number(body.maxTokens) || 600));
+  const maxTokens = Math.max(16, Math.min(LIMITS.maxTokens, Number(body.maxTokens) || 1800));
   const budgetMs = Math.max(1500, Math.min(LIMITS.budgetMs + 1000, Number(body.budgetMs) || LIMITS.budgetMs));
   const preferred = PROVIDERS[body.preferred?.provider] ? body.preferred.provider : '';
   const model = cleanModelId(body.preferred?.model);
