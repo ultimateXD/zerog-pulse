@@ -17,6 +17,7 @@ import {
   detectProviderFromKey, resetHealth,
 } from './aiTransport';
 import { isArabic, buildArabicResponse } from './clinicalArabic';
+import { isDemoMode, deterministicJitter, SIMULATION_DISCLOSURE, SIMULATION_QUALIFICATION } from './simulation';
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, Legend,
 } from 'recharts';
@@ -639,39 +640,45 @@ const OrbitalTrajectoryHUD = React.memo(function OrbitalTrajectoryHUD({ emergenc
     </div>
   );
 });
-const JudgeQuickGuideHUD = React.memo(function JudgeQuickGuideHUD({ onOpenData, onOpenDownlink }) {
+const JudgeQuickGuideHUD = React.memo(function JudgeQuickGuideHUD({ onOpenData, onOpenDownlink, onTriggerScenario, onTryVoice, demoMode }) {
+  const [dismissed, setDismissed] = useState(() => {
+    try { return localStorage.getItem('zgp_judge_quick_start_hidden') === 'true'; } catch { return false; }
+  });
+  const dismiss = () => {
+    setDismissed(true);
+    try { localStorage.setItem('zgp_judge_quick_start_hidden', 'true'); } catch { /* Private mode. */ }
+  };
+  if (dismissed) return null;
+  const steps = [
+    { label: '1. Trigger Hypercapnia/SANS Scenario', action: () => onTriggerScenario('eclss') },
+    { label: '2. Test Bilingual Voice Command', action: onTryVoice },
+    { label: '3. Export Clinical PDF', action: onOpenDownlink },
+  ];
   return (
-    <div className="relative mb-2 overflow-hidden border border-cyan-500/30 bg-[#050b16]/95 px-3 py-2">
-      <HudCorners tone="cyan" />
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="border border-cyan-400/50 bg-cyan-500/10 px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-widest text-cyan-300">
-            JUDGE INTERACTIVE EVALUATION PROTOCOL
-          </span>
-          <span className="font-mono text-[11px] text-slate-300">
-            <strong className="text-cyan-300">[STEP 01]</strong> Trigger a Space Emergency Scenario below &rarr;{' '}
-            <strong className="text-cyan-300">[STEP 02]</strong> Inspect Organ Matrix &amp; Countermeasures &rarr;{' '}
-            <strong className="text-cyan-300">[STEP 03]</strong> Query MED-AI or Transmit Earth Downlink
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={onOpenData}
-            className="border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 font-mono text-[10px] font-bold uppercase tracking-wider text-emerald-300 transition hover:bg-emerald-500/20"
-          >
-            INSPECT NASA DATASETS
-          </button>
-          <button
-            type="button"
-            onClick={onOpenDownlink}
-            className="border border-sky-500/40 bg-sky-500/10 px-2.5 py-1 font-mono text-[10px] font-bold uppercase tracking-wider text-sky-300 transition hover:bg-sky-500/20"
-          >
-            PREVIEW MCC DOWNLINK
-          </button>
-        </div>
+    <aside aria-label="Judge quick-start" className="relative mb-2 rounded-xl border border-cyan-500/30 bg-[#050b16]/95 px-3 py-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <p className="font-mono text-[10px] font-bold uppercase tracking-widest text-cyan-300">
+          Judge quick-start {demoMode && <span className="ml-2 rounded-full bg-amber-500/10 px-2 py-0.5 text-amber-300">INSTANT DEMO</span>}
+        </p>
+        <button type="button" onClick={dismiss} aria-label="Dismiss judge quick-start" className="rounded-md p-1 text-slate-500 transition hover:bg-slate-800 hover:text-slate-200 focus-visible:ring-1 focus-visible:ring-cyan-400">
+          <X size={14} />
+        </button>
       </div>
-    </div>
+      <ol className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1.5">
+        {steps.map((step, i) => (
+          <li key={step.label} className="flex items-center gap-2">
+            <button type="button" onClick={step.action} className="rounded-lg border border-cyan-800/60 bg-cyan-500/5 px-2.5 py-1.5 text-left font-mono text-[11px] text-slate-200 transition hover:border-cyan-500/60 hover:bg-cyan-500/10 focus-visible:ring-1 focus-visible:ring-cyan-400">
+              {step.label}
+            </button>
+            {i < steps.length - 1 && <span aria-hidden="true" className="text-cyan-600">➔</span>}
+          </li>
+        ))}
+      </ol>
+      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[10px] text-slate-500">
+        <span>EN / AR beside Voice · PDF export: choose “Save as PDF” in the print dialog.</span>
+        <button type="button" onClick={onOpenData} className="text-emerald-400 underline underline-offset-2">Inspect NASA references</button>
+      </div>
+    </aside>
   );
 });
 
@@ -711,10 +718,11 @@ const DualImpactAndDisclosureHUD = React.memo(function DualImpactAndDisclosureHU
             NASA SPACE APPS COMPLIANCE // AI &amp; DATA DISCLOSURE
           </p>
           <h3 className="mt-1 font-mono text-xs font-bold uppercase tracking-wider text-white">
-            VERIFIED NASA OPEN DATA + HYBRID AI ARCHITECTURE
+            SIMULATION + AI ASSISTANCE DISCLOSURE
           </h3>
           <p className="mt-1 text-xs leading-relaxed text-slate-300">
-            Grounded in official NASA-STD-3001 Vol. 1 &amp; 2 limits and NASA OSDR (OSD-51, OSD-194). Uses a deterministic clinical rule engine with optional live LLM reasoning (Groq / OpenRouter / Gemini).{' '}
+            {SIMULATION_DISCLOSURE}{' '}
+            <span className="text-slate-400">{SIMULATION_QUALIFICATION}</span>{' '}
             <button type="button" onClick={onOpenData} className="font-mono font-bold text-amber-300 underline">
               [View Sources]
             </button>
@@ -2326,7 +2334,7 @@ function AIChat({ ctx }) {
       const now = ctxRef.current;
       if (!mountedRef.current || now.crew.id !== crewId || now.scenarioId !== firedScenario) return;
       runQuery(autoPrompt, [], now, AUTO_REPLY_TOKENS);
-    }, 5000);
+    }, fresh.demoMode ? 0 : 5000);
     return cancelQuery;
   }, [contextKey, runQuery, cancelQuery, stopRecognition, cancelSpeech]);
 
@@ -2448,7 +2456,7 @@ function AIChat({ ctx }) {
     : (engine.provider === 'auto' ? '🔀 MED-AI' : engineTile.badge) + ' reasoning over live telemetry…';
 
   return (
-    <section className="flex flex-col rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+    <section id="med-ai-chat" className="flex flex-col rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <h2 className="flex items-center gap-2 font-mono text-xs font-bold uppercase tracking-[0.2em] text-slate-400">
           <Bot size={15} className="text-sky-400" /> {NASA_DATA_CONFIG.ai.officerName}
@@ -2682,7 +2690,7 @@ function DownlinkModalContent({ onClose, packet }) {
       + '<td style="padding:7px 12px;border-bottom:1px solid #1f2937;"><span style="' + (st2.done ? chip('NORMAL') : 'color:#94a3b8;background:#0f172a;border:1px solid #334155;') + 'padding:2px 10px;border-radius:4px;font-size:9px;letter-spacing:2px;font-weight:bold;">' + (st2.done ? 'DONE' : 'PENDING') + '</span></td>'
       + '</tr>'
     )).join('');
-    const html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>NASA Flight Surgeon Clinical Telemetry Report</title>'
+    const html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>ZeroG Pulse — Simulated Clinical Telemetry Report</title>'
       + '<style>body{background:#0b1220;color:#e2e8f0;font-family:Consolas,monospace;padding:28px;}'
       + 'h1{color:#38bdf8;font-size:17px;letter-spacing:2px;margin:0;}'
       + '.class{color:#fbbf24;border:1px solid #d97706;font-size:10px;letter-spacing:4px;padding:2px 10px;border-radius:4px;}'
@@ -2697,7 +2705,7 @@ function DownlinkModalContent({ onClose, packet }) {
       + '.sig div{border-top:1px solid #64748b;padding-top:6px;font-size:10px;color:#94a3b8;letter-spacing:1px;}'
       + 'small{color:#64748b;}</style></head><body>'
       + '<div style="display:flex;justify-content:space-between;align-items:center;">'
-      + '<h1>NATIONAL AERONAUTICS AND SPACE ADMINISTRATION</h1><span class="class">AUTONOMOUS / NOT EARTH-REVIEWED</span></div>'
+      + '<h1>NASA SPACE APPS — ZERO-G PULSE PROTOTYPE</h1><span class="class">AUTONOMOUS / NOT EARTH-REVIEWED</span></div>'
       + '<h2 style="font-size:13px;letter-spacing:2px;color:#f8fafc;margin:6px 0 0 0;">FLIGHT SURGEON CLINICAL TELEMETRY REPORT — ZERO-G PULSE</h2>'
       + '<small style="color:#64748b;">Report ' + packet.reportId + ' · Mission ' + packet.missionId + ' · Transmission delay ' + packet.commDelay + ' (one-way light time)</small>'
       + '<div class="meta">'
@@ -2716,7 +2724,8 @@ function DownlinkModalContent({ onClose, packet }) {
       + '<div>GENERATED AUTONOMOUSLY BY MED-AI — ONBOARD MEDICAL OFFICER, ZERO-G PULSE v2.1</div>'
       + '<div>DSN TARGET: ' + packet.dsnTarget + '</div>'
       + '</div>'
-      + '<small style="display:block;margin-top:14px;">Earth MCC response ETA ~29 min (round-trip light time). This document was produced without human review per autonomous operations doctrine NASA-STD-3001 / HRP Standard Measures.</small>'
+      + '<small style="display:block;margin-top:14px;">' + SIMULATION_DISCLOSURE + '</small>'
+      + '<small style="display:block;margin-top:6px;">' + SIMULATION_QUALIFICATION + '</small>'
       + '</body></html>';
     try {
       const w = window.open('', '_blank', 'width=860,height=960');
@@ -2860,9 +2869,9 @@ function DownlinkModalContent({ onClose, packet }) {
             className="flex items-center gap-1.5 rounded-lg border border-emerald-500/50 bg-emerald-500/15 px-3 py-2 font-mono text-xs font-bold text-emerald-300 transition-all hover:bg-emerald-500/25">
             {copied ? <CheckCircle2 size={13} /> : <Copy size={13} />} {copied ? 'COPIED ✓' : 'Copy Telemetry JSON'}
           </button>
-          <button onClick={printReport}
+          <button onClick={printReport} title="Open the print dialog and choose Save as PDF"
             className="flex items-center gap-1.5 rounded-lg border border-slate-600 bg-slate-800/60 px-3 py-2 font-mono text-xs font-bold text-slate-200 transition-all hover:border-slate-400">
-            <Printer size={13} /> Print Clinical Report
+            <Printer size={13} /> Export Clinical PDF
           </button>
         </div>
       </div>
@@ -2948,6 +2957,10 @@ const MissionFooter = React.memo(function MissionFooter({ onOpenData }) {
           <Database size={12} />
           NASA Open Data &amp; Scientific Validity: {NASA_DATA_CONFIG.datasets.map((d) => d.id).join(' · ')} — CLICK TO INSPECT
         </button>
+        <div className="w-full border-t border-slate-800/70 pt-2 font-mono text-[10px] leading-relaxed text-slate-500">
+          <p>{SIMULATION_DISCLOSURE}</p>
+          <p className="mt-1 text-slate-600">{SIMULATION_QUALIFICATION}</p>
+        </div>
       </div>
     </footer>
   );
@@ -2956,46 +2969,63 @@ const MissionFooter = React.memo(function MissionFooter({ onOpenData }) {
 /* ============================================================================
  * SECTION 9 — Root App Component (wiring + telemetry engine)
  * ==========================================================================*/
-function seedHistory(crew, met) {
+function seedHistory(crew, met, scenarioId = 'nominal', demoMode = false) {
+  const target = computeTarget(crew, NASA_DATA_CONFIG.scenarios[scenarioId]);
   return Array.from({ length: 10 }, (_, i) => {
+    const sampleMet = met - (9 - i) * TICK_MS / 1000;
     const vals = {};
     METRIC_ORDER.forEach((key) => {
-      vals[key] = crew.baselines[key] + (Math.random() - 0.5) * 2 * NASA_DATA_CONFIG.metrics[key].jitter;
+      vals[key] = target[key] + (demoMode ? 0 : deterministicJitter({
+        crewId: crew.id, scenarioId, metricKey: key, met: sampleMet,
+        amplitude: NASA_DATA_CONFIG.metrics[key].jitter,
+      }));
     });
-    return { met: fmtMET(met - (9 - i) * TICK_MS / 1000), ...vals };
+    return { met: fmtMET(sampleMet), ...vals };
   });
 }
 
 export default function App() {
+  const [demoMode] = useState(isDemoMode);
   const [crewId, setCrewId] = useState(NASA_DATA_CONFIG.crews[0].id);
   const [scenarioId, setScenarioId] = useState('nominal');
-  const [history, setHistory] = useState(() => seedHistory(NASA_DATA_CONFIG.crews[0], 15600));
+  const [history, setHistory] = useState(() => seedHistory(NASA_DATA_CONFIG.crews[0], 15600, 'nominal', demoMode));
   const [checkedSteps, setCheckedSteps] = useState([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [downlinkOpen, setDownlinkOpen] = useState(false);
+  const valuesRef = useRef({ ...NASA_DATA_CONFIG.crews[0].baselines });
+  const metRef = useRef(15600);
 
   /* Memoized root event handlers to prevent child re-renders */
   const handleCrewChange = useCallback((id) => {
     if (id === crewId) return;
     const nextCrew = NASA_DATA_CONFIG.crews.find((c) => c.id === id);
     if (!nextCrew) return;
-    valuesRef.current = nextCrew.baselines;
+    const nextScenario = demoMode ? scenarioId : 'nominal';
+    valuesRef.current = computeTarget(nextCrew, NASA_DATA_CONFIG.scenarios[nextScenario]);
     setCrewId(id);
-    setHistory(seedHistory(nextCrew, metRef.current));
+    setHistory(seedHistory(nextCrew, metRef.current, nextScenario, demoMode));
     setCheckedSteps([]);
-  }, [crewId]);
+  }, [crewId, scenarioId, demoMode]);
   const handleScenarioChange = useCallback((id) => {
     if (id === scenarioId || !NASA_DATA_CONFIG.scenarios[id]) return;
+    if (demoMode) {
+      const activeCrew = NASA_DATA_CONFIG.crews.find((c) => c.id === crewId);
+      // Commit the spike before AIChat's zero-delay timer reads ctxRef.current.
+      valuesRef.current = computeTarget(activeCrew, NASA_DATA_CONFIG.scenarios[id]);
+      setHistory(seedHistory(activeCrew, metRef.current, id, true));
+    }
     setScenarioId(id);
     setCheckedSteps([]);
-  }, [scenarioId]);
+  }, [scenarioId, crewId, demoMode]);
   const handleOpenDownlink = useCallback(() => setDownlinkOpen(true), []);
   const handleCloseDownlink = useCallback(() => setDownlinkOpen(false), []);
   const handleOpenData = useCallback(() => setDrawerOpen(true), []);
   const handleCloseData = useCallback(() => setDrawerOpen(false), []);
-
-  const valuesRef = useRef({ ...NASA_DATA_CONFIG.crews[0].baselines });
-  const metRef = useRef(15600);
+  const handleTryVoice = useCallback(() => {
+    const chat = document.getElementById('med-ai-chat');
+    chat?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    chat?.querySelector('[aria-label="English voice input"]')?.focus({ preventScroll: true });
+  }, []);
 
   const crew = NASA_DATA_CONFIG.crews.find((c) => c.id === crewId);
   const scenario = NASA_DATA_CONFIG.scenarios[scenarioId];
@@ -3009,8 +3039,11 @@ export default function App() {
         const cur = valuesRef.current[k];
         const cfg = NASA_DATA_CONFIG.metrics[k];
         const drift = (target[k] - cur) * SMOOTHING;
-        const jitter = (Math.random() - 0.5) * 2 * cfg.jitter;
-        next[k] = cur + drift + jitter;
+        const jitter = demoMode ? 0 : deterministicJitter({
+          crewId: crew.id, scenarioId, metricKey: k,
+          met: metRef.current + TICK_MS / 1000, amplitude: cfg.jitter,
+        });
+        next[k] = demoMode ? target[k] : cur + drift + jitter;
       });
       valuesRef.current = next;
       // Increment once per real interval, never inside a replayable state updater.
@@ -3019,16 +3052,16 @@ export default function App() {
       setHistory((h) => [...h, point].slice(-HISTORY_LEN));
     }, TICK_MS);
     return () => clearInterval(id);
-  }, [crew, scenarioId]);
+  }, [crew, scenarioId, demoMode]);
 
   const values = useMemo(() => history.length ? history[history.length - 1] : crew.baselines, [history, crew]);
   const overall = getOverallStatus(values);
   const prevValues = history.length > 1 ? history[history.length - 2] : values;
 
   const ctx = useMemo(() => ({
-    crew, scenario, scenarioId, values, checkedSteps,
+    crew, scenario, scenarioId, values, checkedSteps, demoMode,
     met: values.met || fmtMET(15600),
-  }), [crew, scenario, scenarioId, values, checkedSteps]);
+  }), [crew, scenario, scenarioId, values, checkedSteps, demoMode]);
 
   /* Fast-bail: Only compute expensive downlink packet payload when downlink modal is actually open */
   const packet = useMemo(() => {
@@ -3049,8 +3082,9 @@ export default function App() {
 
       <MissionHeader crewId={crewId} onCrewChange={handleCrewChange} overall={overall} onTransmit={handleOpenDownlink} />
       <div className="mx-auto max-w-[1600px] px-4">
+        <JudgeQuickGuideHUD onOpenData={handleOpenData} onOpenDownlink={handleOpenDownlink}
+          onTriggerScenario={handleScenarioChange} onTryVoice={handleTryVoice} demoMode={demoMode} />
         <OrbitalTrajectoryHUD emergency={scenarioId !== 'nominal'} />
-        <JudgeQuickGuideHUD onOpenData={handleOpenData} onOpenDownlink={handleOpenDownlink} />
       </div>
       <ScenarioBar scenarioId={scenarioId} onScenarioChange={handleScenarioChange} />
 
