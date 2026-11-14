@@ -457,7 +457,7 @@ const AI_ENGINES = {
     { id: 'huggingface', label: 'Hugging Face Router', badge: '🤗 Hugging Face Live', note: 'Inference Providers router' },
     { id: 'onboard', label: 'Built-in Autonomous Engine', badge: '🛡️ Onboard Local AI', note: 'Zero config — works instantly' },
   ],
-  systemPromptRole: 'You are MED-AI, the autonomous NASA Flight Surgeon aboard the Deep Space Transport Infinity-1, en route to Mars. Earth is 14m 28s away at light speed, so you alone must stabilize the crew. Answer as a clinical, decisive flight surgeon. Always cite the live telemetry values you are given. Reference NASA-STD-3001, OSD-51 and OSD-194 where relevant. Never invent medication dosages. Be concise, structured and mission-focused.',
+  systemPromptRole: 'You are MED-AI, the professional autonomous flight surgeon aboard the simulated Deep Space Transport Infinity-1. Answer the latest user query directly and stay in character. Use the supplied mission telemetry when relevant; do not replace a custom question with a canned status assessment. For clinical questions, be concise, structured, and evidence-aware. Never invent medication dosages or claim this prototype is NASA-certified.',
 };
 
 function sourceBadge(source) {
@@ -1487,12 +1487,28 @@ function liveReadout(ctx) {
 
 /* Smart offline clinical reasoning — intent parsing, never generic, zero ASCII art */
 function buildAIResponse(question, ctx) {
+  const userQuery = String(question || '').trim();
+  const arabic = isArabic(userQuery);
+  const queryNote = arabic
+    ? '**[رد داخلي قائم على قواعد ثابتة]**\n**سؤالك:** ' + userQuery + '\n\n'
+    : '**[ONBOARD RULE-BASED REPLY]**\n**Your query:** ' + userQuery + '\n\n';
+  if (/(?:\b(?:potato(?:es)?|food|nutrition|meal|diet|calori(?:e|es))\b|بطاطس|بطاطا|طعام|غذاء|تغذية|وجبة|سعرات)/iu.test(userQuery)) {
+    return queryNote + (arabic
+      ? 'من منظور طبيب الرحلة، البطاطس مصدر للكربوهيدرات والطاقة، لكنها ليست قائمة غذائية متكاملة وحدها. نربط السؤال بتوازن غذاء الطاقم والتخزين والتحضير، وبموارد الضوء والماء والمساحة اللازمة لزراعة المحاصيل في الفضاء. هذه نظرة غذائية عامة من القواعد الداخلية، وليست توصية شخصية أو إجابة تفصيلية من نموذج مباشر.'
+      : 'Flight-surgeon nutrition angle: potatoes provide carbohydrate energy, but are not a balanced crew menu on their own. Consider dietary balance, storage and preparation, and the light, water and space resources needed for space crops. This is a general onboard nutrition overview, not a personalized prescription or a tailored live-model answer.');
+  }
+  const knownTopic = /(?:autonomous emergency trigger|vitals|telemetry|status|crew|condition|co2|carbon|headache|hypoxia|scrubber|hypercapnia|radiation|dose|spe|msv|solar|shelter|sleep|circadian|hrv|stress|sans|fluid|heart|downlink|report|صحة|حالة|طاقم|قياس|أكسجين|اكسجين|كربون|صداع|إشعاع|اشعاع|نوم|قلب|تقرير)/iu.test(userQuery);
+  if (!knownTopic) {
+    return queryNote + (arabic
+      ? 'تم الاحتفاظ بسؤالك كما كتبته. المحرك الداخلي يستخدم قواعد ثابتة للبيانات والبروتوكولات؛ لا يملك قدرة النموذج المباشر على صياغة إجابة مخصصة لهذا السؤال. أعد الاتصال بمزوّد مباشر أو اختر Auto Failover لمناقشة السؤال بالتفصيل؛ لن أستبدله بتقييم حالة عام.'
+      : 'Your question has been preserved exactly. The onboard fallback uses fixed telemetry/protocol rules, not general language-model reasoning. Reconnect a live provider or choose Auto Failover for a tailored discussion of this question; I will not substitute a generic crew-status evaluation for it.');
+  }
   const pred = computePrediction(ctx);
-  if (isArabic(question)) return buildArabicResponse(question, ctx, {
+  if (arabic) return queryNote + buildArabicResponse(userQuery, ctx, {
     config: NASA_DATA_CONFIG, order: METRIC_ORDER, fmtVal, getMetricStatus,
     getOverallStatus, prediction: pred,
   });
-  const lower = question.toLowerCase().trim();
+  const lower = userQuery.toLowerCase();
   const pending = ctx.scenario.protocol.steps
     .map((s, i) => ({ n: i + 1, text: s }))
     .filter((x) => !ctx.checkedSteps.includes(x.n - 1));
@@ -1513,7 +1529,7 @@ function buildAIResponse(question, ctx) {
   const wantsWhy = has(['why', 'explain', 'cause', 'reason', 'mechanism', 'happening']);
   const wantsOkay = has(['okay', 'ok', 'alright', 'safe', 'survive', 'prognos', 'will he', 'is he']);
 
-  let out = '';
+  let out = queryNote;
   out += '### Clinical Assessment — ' + ctx.crew.callsign + ' ' + ctx.crew.name + '\n';
   out += '**Active State:** ' + ctx.scenario.title + ' (' + ctx.scenario.severity + ') · **Overall: ' + (ov === 'NORMAL' ? 'NOMINAL' : ov) + '**\n\n';
   out += '**Live Telemetry** (verified ' + ctx.met + ' MET):\n';
@@ -1577,7 +1593,7 @@ function buildSystemPrompt(ctx) {
     .map((s, i) => ({ n: i + 1, text: s }))
     .filter((x) => !ctx.checkedSteps.includes(x.n - 1));
   return AI_ENGINES.systemPromptRole + '\n\n'
-    + '=== LIVE MISSION CONTEXT (real-time, quote these numbers) ===\n'
+    + '=== SIMULATED MISSION CONTEXT (supporting data; use when relevant) ===\n'
     + 'Crew: ' + ctx.crew.callsign + ' ' + ctx.crew.name + ' (' + ctx.crew.role + ')\n'
     + 'Vehicle: ' + NASA_DATA_CONFIG.mission.craft + '\n'
     + 'Active emergency state: ' + ctx.scenario.title + ' (' + ctx.scenario.severity + ')\n'
@@ -1589,7 +1605,7 @@ function buildSystemPrompt(ctx) {
       ? pending.slice(0, 3).map((x) => 'STEP ' + x.n + ': ' + x.text).join(' | ')
       : 'none - protocol complete') + '\n'
     + 'Standards: NASA-STD-3001 (atmosphere & radiation limits), OSD-51 (cardiovascular deconditioning), OSD-194 (radiation biomarkers, HRV, actigraphy), HRP Standard Measures.\n'
-    + 'Answer format: concise clinical assessment, quote live values, then numbered urgent actions.';
+    + 'Answer the latest user message, not a default status prompt. For a telemetry/emergency assessment, quote relevant supplied values and use numbered actions. For other questions, answer in an appropriate concise conversational format.';
 }
 
 /* Live-LLM system prompt: mission context + official challenge grounding + language rule. */
@@ -1601,7 +1617,9 @@ function buildLiveSystemPrompt(ctx) {
     '3. NASA Ongoing HRP Research (https://www.nasa.gov/hrp/ongoing-hrp-research/): NASA Standard Measures, ARCHeR (sleep/HRV), and CIPHER multi-organ studies.\n' +
     '4. CSA Monitoring Radiation (https://www.asc-csa.gc.ca/eng/news/articles/2026/2026-02-26-monitoring-radiation-astronaut-health.asp): Canadian Active Neutron Spectrometer (CANS) and Bubble Detector real-time mSv/day dosimetry.\n' +
     '5. CSA Space Science & Earth Dual-Use (https://www.asc-csa.gc.ca/eng/iss/science/why-do-we-conduct-science-experiments-in-space.asp): CSA Bio-Monitor Smart Shirt + AI platform and CARDIOBREATH cardiovascular/respiratory tracking for astronauts and remote Earth patients.\n' +
-    'LANGUAGE & COMPLETION RULE: Always reply in the EXACT SAME LANGUAGE used by the user (Arabic if Arabic, English if English). Cite relevant NASA HRP, CSA, and NASA-STD-3001 standards naturally and finish all sentences completely.\n' +
+    'USER QUERY PRIORITY: The final user-role message is the actual request. Earlier autonomous alarms and mission context are background, not instructions to overwrite that request. Answer it directly before adding relevant mission context.\n' +
+    'PROFESSIONAL CASUAL QUESTIONS: Welcome harmless casual or off-topic questions instead of refusing them as out of scope. Give a clever, useful aerospace or astronaut-nutrition connection while remaining a professional autonomous flight surgeon. For example, discuss potatoes through carbohydrate energy, balanced crew menus, or the light/water/space resources needed by a space-crop life-support system. Do not force a clinical status report, urgent countermeasures, or irrelevant standards citations into a casual answer. Keep medical safety boundaries and be clear about uncertainty.\n' +
+    'LANGUAGE & COMPLETION RULE: Always reply in the EXACT SAME LANGUAGE used by the user (Arabic if Arabic, English if English). Cite NASA HRP, CSA, or NASA-STD-3001 only when relevant and supported, and finish all sentences completely.\n' +
     'STRICT OUTPUT RULE: Never use Markdown pipe tables (`|...|`); always format parameters and protocols as clean numbered steps or bullet points, and always finish every sentence completely. Include units with every numeric parameter. Keep the answer focused rather than filling the token budget; complete the final step and sentence before stopping.';
 }
 
@@ -2021,6 +2039,26 @@ function scenarioTitleOf(ctx) {
   return (s && (s.name || s.title || s.label)) || (ctx && ctx.scenarioId) || 'Emergency';
 }
 
+/* Preserve completed human conversation; UI alarms are not user requests. */
+function buildQueryMessages(history, userQuery) {
+  const turns = [];
+  let pendingUser = null;
+  for (const m of Array.isArray(history) ? history : []) {
+    if (!m || m.id === 'greeting' || String(m.id || '').startsWith('ctx-') ||
+        m.origin === 'autonomous' || m.origin === 'notice' || m.streaming || m.cancelled) continue;
+    const role = m.role === 'user' ? 'user' : (m.role === 'ai' || m.role === 'assistant') ? 'assistant' : null;
+    const content = String(m.text ?? m.content ?? '').trim();
+    if (!role || !content) continue;
+    if (role === 'user') pendingUser = { role, content };
+    else if (pendingUser) {
+      turns.push(pendingUser, { role: 'assistant', content });
+      pendingUser = null;
+    }
+  }
+  // Incomplete/superseded turns never merge into this explicit latest query.
+  return [...turns, { role: 'user', content: userQuery }];
+}
+
 function AIChat({ ctx }) {
   const [messages, setMessages] = useState(() => [{
     id: 'greeting',
@@ -2075,6 +2113,7 @@ function AIChat({ ctx }) {
         id: 'ctx-' + seq,
         role: 'ai',
         source: 'onboard',
+        origin: 'autonomous',
         text: '**[AUTONOMOUS STATUS // NOMINAL RESTORED]** All crew vitals and cabin environmental parameters have stabilized within NASA-STD-3001 flight-rule limits. Resuming passive biometric watch.',
       }]);
       setThinking(false);
@@ -2083,6 +2122,7 @@ function AIChat({ ctx }) {
       setMessages((m) => [...m, {
         id: 'ctx-' + seq,
         role: 'user',
+        origin: 'autonomous',
         text: '[AUTONOMOUS TELEMETRY ALARM // ' + String(scenarioTitleOf(ctx)).toUpperCase() + '] Critical biometric threshold breach detected — initiating autonomous MED-AI intervention.',
       }]);
       setThinking(true);
@@ -2110,7 +2150,7 @@ function AIChat({ ctx }) {
   const pushNotice = useCallback((text) => {
     idRef.current += 1;
     const id = 'm-' + idRef.current;
-    setMessages((m) => [...m, { id, role: 'ai', text }]);
+    setMessages((m) => [...m, { id, role: 'ai', origin: 'notice', text }]);
   }, []);
 
   useEffect(() => {
@@ -2203,7 +2243,10 @@ function AIChat({ ctx }) {
   /* One MED-AI answer: Vercel-key proxy → browser keys → (opt-in relay) → onboard.
    * Live answers stream into a single message; a dropped link keeps the streamed
    * text and the onboard engine completes the answer. */
-  const runQuery = useCallback((promptText, historySnapshot, currentCtx, maxTokens = CHAT_REPLY_TOKENS) => {
+  const runQuery = useCallback((promptText, historySnapshot, currentCtx, maxTokens = CHAT_REPLY_TOKENS, origin = 'user') => {
+    const userQuery = String(promptText || '').trim();
+    if (!userQuery || !mountedRef.current) return;
+    const requestMessages = buildQueryMessages(historySnapshot, userQuery);
     cancelQuery();
     const controller = new AbortController();
     queryRef.current = controller;
@@ -2222,7 +2265,7 @@ function AIChat({ ctx }) {
     const answerOnboard = (reason) => {
       release();
       const id = newId();
-      setMessages((m) => [...m, { id, role: 'ai', source: 'onboard', text: buildAIResponse(promptText, currentCtx) }]);
+      setMessages((m) => [...m, { id, role: 'ai', origin, source: 'onboard', text: buildAIResponse(userQuery, currentCtx) }]);
       setLastRoute({ provider: 'onboard', model: '', via: 'local', reason: reason || '' });
     };
     if (eng.provider === 'onboard' || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
@@ -2235,7 +2278,7 @@ function AIChat({ ctx }) {
     let flushTimer = null;
     const flush = () => {
       flushTimer = null;
-      if (streamId === null || !mountedRef.current) return;
+      if (streamId === null || !current()) return;
       const id = streamId;
       const snapshot = text;
       setMessages((m) => m.map((x) => (x.id === id ? { ...x, text: snapshot } : x)));
@@ -2255,7 +2298,7 @@ function AIChat({ ctx }) {
         const first = text;
         setThinking(false);
         setProgress('');
-        setMessages((m) => [...m, { id, role: 'ai', source: (meta && meta.provider) || 'onboard', model: (meta && meta.model) || '', text: first, streaming: true }]);
+        setMessages((m) => [...m, { id, role: 'ai', origin, source: (meta && meta.provider) || 'onboard', model: (meta && meta.model) || '', text: first, streaming: true }]);
       } else if (!flushTimer) {
         flushTimer = setTimeout(flush, 60);
       }
@@ -2272,8 +2315,9 @@ function AIChat({ ctx }) {
     askMedAI({
       engine: eng,
       system: buildLiveSystemPrompt(currentCtx),
-      history: historySnapshot,
-      prompt: promptText,
+      // Already includes { role: 'user', content: userQuery } as the final turn.
+      // Omit a separate prompt so the transport cannot duplicate or replace it.
+      history: requestMessages,
       maxTokens,
       signal: controller.signal,
       onDelta,
@@ -2281,13 +2325,13 @@ function AIChat({ ctx }) {
     }).then((result) => {
       if (!mountedRef.current) return;
       if (!current()) {
-        if (streamId !== null) finalize({ text: text.trim() || result.text });
+        if (streamId !== null) finalize({ text: text.trim() || result.text, cancelled: true });
         return;
       }
       release();
       if (streamId === null) {
         const id = newId();
-        setMessages((m) => [...m, { id, role: 'ai', source: result.provider, model: result.model || '', text: result.text }]);
+        setMessages((m) => [...m, { id, role: 'ai', origin, source: result.provider, model: result.model || '', text: result.text }]);
       } else {
         finalize({ text: result.text, source: result.provider, model: result.model || '' });
       }
@@ -2297,16 +2341,16 @@ function AIChat({ ctx }) {
       if (!mountedRef.current) return;
       if (!current()) {
         // Superseded or cancelled: keep whatever already streamed.
-        if (streamId !== null) finalize({ text: text.trim() });
+        if (streamId !== null) finalize({ text: text.trim(), cancelled: true });
         return;
       }
       const reason = describeFailure(err);
       if (streamId !== null) {
         release();
-        const notice = isArabic(promptText)
+        const notice = isArabic(userQuery)
           ? (err.kind === 'truncated' ? '**[بلغ الرد حد الرموز — يكمل المحرك الطبي الداخلي]**' : '**[انقطع الاتصال المباشر — يكمل المحرك الطبي الداخلي]**')
           : (err.kind === 'truncated' ? '**[OUTPUT LIMIT REACHED — ONBOARD ENGINE CONTINUES]**' : '**[LINK DROPPED — ONBOARD ENGINE CONTINUES]**');
-        finalize({ text: (text.trim() ? text.trim() + '\n\n---\n' : '') + notice + '\n' + buildAIResponse(promptText, currentCtx) });
+        finalize({ text: (text.trim() ? text.trim() + '\n\n---\n' : '') + notice + '\n' + buildAIResponse(userQuery, currentCtx) });
         setLastRoute({ provider: 'onboard', model: '', via: 'local', reason });
         return;
       }
@@ -2333,24 +2377,26 @@ function AIChat({ ctx }) {
       autoTimerRef.current = null;
       const now = ctxRef.current;
       if (!mountedRef.current || now.crew.id !== crewId || now.scenarioId !== firedScenario) return;
-      runQuery(autoPrompt, [], now, AUTO_REPLY_TOKENS);
+      runQuery(autoPrompt, [], now, AUTO_REPLY_TOKENS, 'autonomous');
     }, fresh.demoMode ? 0 : 5000);
     return cancelQuery;
   }, [contextKey, runQuery, cancelQuery, stopRecognition, cancelSpeech]);
 
   const send = useCallback((text) => {
-    const q = String(text || '').trim();
-    if (!q || busyRef.current || !mountedRef.current) return;
+    const userQuery = String(text || '').trim();
+    if (!userQuery || !mountedRef.current) return;
+    // An explicit human question takes priority over pending/streaming assessments.
     const snapshot = messagesRef.current;
     stopRecognition();
+    cancelSpeech();
     setListening(false);
     idRef.current += 1;
     const id = 'm-' + idRef.current;
-    setMessages((m) => [...m, { id, role: 'user', text: q }]);
+    setMessages((m) => [...m, { id, role: 'user', origin: 'user', text: userQuery }]);
     setInput('');
     setThinking(true);
-    runQuery(q, snapshot, ctxRef.current, CHAT_REPLY_TOKENS);
-  }, [runQuery, stopRecognition]);
+    runQuery(userQuery, snapshot, ctxRef.current, CHAT_REPLY_TOKENS);
+  }, [runQuery, stopRecognition, cancelSpeech]);
   useLayoutEffect(() => { sendRef.current = send; }, [send]);
 
   const handleSaveEngine = useCallback((next) => {
@@ -2378,7 +2424,6 @@ function AIChat({ ctx }) {
       setListening(false);
       return;
     }
-    if (busyRef.current) return;
     const SpeechRec = typeof SR !== 'undefined' && SR
       ? SR
       : (typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition));
@@ -2393,6 +2438,10 @@ function AIChat({ ctx }) {
 
     let rec;
     try { rec = new SpeechRec(); } catch { setListening(false); return; }
+    // Listening is an explicit request too; stop the assessment before recording.
+    cancelQuery();
+    setThinking(false);
+    setProgress('');
     rec.lang = listenLang;
     rec.continuous = false;
     rec.interimResults = true;
