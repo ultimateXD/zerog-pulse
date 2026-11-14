@@ -16,7 +16,7 @@ import {
   getServerStatus, peekServerStatus, listModels, testConnection, describeFailure, providerLabel, redactSecrets,
   detectProviderFromKey, resetHealth,
 } from './aiTransport';
-import { isArabic, speechLanguage, buildArabicResponse } from './clinicalArabic';
+import { isArabic, buildArabicResponse } from './clinicalArabic';
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, Legend,
 } from 'recharts';
@@ -2023,7 +2023,10 @@ function AIChat({ ctx }) {
   const [thinking, setThinking] = useState(false);
   const [progress, setProgress] = useState('');
   const [listening, setListening] = useState(false);
-  const [listenLang, setListenLang] = useState('en-US');
+  const [listenLang, setListenLang] = useState(() => {
+    try { return localStorage.getItem('zgp_voice_input_lang') === 'ar-EG' ? 'ar-EG' : 'en-US'; }
+    catch { return 'en-US'; }
+  });
   const [voiceOn, setVoiceOn] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   // The saved engine is the single source of truth for the badge and every query.
@@ -2041,7 +2044,6 @@ function AIChat({ ctx }) {
   const autoTimerRef = useRef(null);
   const busyRef = useRef(false);
   const mountedRef = useRef(false);
-  const languageRef = useRef('');
   const sendRef = useRef(null);
   const idRef = useRef(0);
 
@@ -2136,7 +2138,8 @@ function AIChat({ ctx }) {
     if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
     try {
       window.speechSynthesis.cancel();
-      const lang = speechLanguage(languageRef.current || rawText);
+      // Read the reply's language, independently of the microphone/input setting.
+      const lang = /[\u0600-\u06FF]/.test(String(rawText || '')) ? 'ar-EG' : 'en-US';
       const arabic = lang.startsWith('ar');
       const cleaned = String(rawText || '')
         .replace(/SpO₂|SpO2/gi, arabic ? 'تشبع الأكسجين' : 'S P O 2')
@@ -2331,7 +2334,6 @@ function AIChat({ ctx }) {
     const q = String(text || '').trim();
     if (!q || busyRef.current || !mountedRef.current) return;
     const snapshot = messagesRef.current;
-    languageRef.current = q;
     stopRecognition();
     setListening(false);
     idRef.current += 1;
@@ -2353,6 +2355,14 @@ function AIChat({ ctx }) {
   }, []);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
 
+  const selectListenLanguage = (lang) => {
+    if (lang === listenLang) return;
+    // Stop the old session so a late transcript cannot be sent in the wrong mode.
+    stopRecognition();
+    setListening(false);
+    setListenLang(lang);
+    try { localStorage.setItem('zgp_voice_input_lang', lang); } catch { /* Private mode. */ }
+  };
   // Improved Microphone Input: Live transcript preview + auto-send when finished speaking
   const startVoice = () => {
     if (recognitionRef.current) {
@@ -2375,7 +2385,7 @@ function AIChat({ ctx }) {
 
     let rec;
     try { rec = new SpeechRec(); } catch { setListening(false); return; }
-    rec.lang = speechLanguage(input.trim() || languageRef.current);
+    rec.lang = listenLang;
     rec.continuous = false;
     rec.interimResults = true;
     rec.maxAlternatives = 1;
@@ -2416,7 +2426,6 @@ function AIChat({ ctx }) {
     };
 
     recognitionRef.current = rec;
-    setListenLang(rec.lang);
     setListening(true);
     try { rec.start(); } catch { stopRecognition(); setListening(false); }
   };
@@ -2480,16 +2489,28 @@ function AIChat({ ctx }) {
         ))}
       </div>
 
-      <form onSubmit={(e) => { e.preventDefault(); send(input); }} className="mt-2 flex gap-2">
-        <input value={input} onChange={(e) => { setInput(e.target.value); if (e.target.value.trim()) languageRef.current = e.target.value; }}
-          placeholder={listening ? (listenLang.startsWith('ar') ? 'جارٍ الاستماع... تحدث الآن بالعربية' : 'Listening... speak now in English') : 'Ask MED-AI about crew health…'}
-          className="flex-1 rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-2 font-mono text-sm text-slate-200 placeholder-slate-600 outline-none focus:border-sky-500/60" />
-        <button type="button" onClick={startVoice} title="Voice input"
-          className={'flex items-center gap-1.5 rounded-lg border px-2.5 py-2 font-mono text-xs font-bold transition-all ' + (
-            listening ? 'border-rose-500/60 bg-rose-500/20 text-rose-300 animate-pulse'
-              : 'border-slate-700 bg-slate-950/80 text-slate-300 hover:border-sky-500/50 hover:text-sky-300')}>
-          <Mic size={14} /> {listening ? 'LISTENING' : 'Voice'}
-        </button>
+      <form onSubmit={(e) => { e.preventDefault(); send(input); }} className="mt-2 flex flex-wrap gap-2">
+        <input value={input} onChange={(e) => setInput(e.target.value)}
+          placeholder={listening ? (listenLang === 'ar-EG' ? 'جارٍ الاستماع... تحدث بالعربية...' : 'Speak in English...') : 'Ask MED-AI about crew health…'}
+          className="min-w-0 basis-full flex-1 rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-2 font-mono text-sm text-slate-200 placeholder-slate-600 outline-none focus:border-sky-500/60 sm:basis-0 sm:min-w-[120px]" />
+        <div className="flex shrink-0 items-center gap-1.5">
+          <button type="button" onClick={startVoice} title={listenLang === 'ar-EG' ? 'Voice input — Arabic (Egypt)' : 'Voice input — English (US)'} aria-pressed={listening}
+            className={'flex items-center gap-1.5 rounded-lg border px-2.5 py-2 font-mono text-xs font-bold transition-all ' + (
+              listening ? 'border-rose-500/60 bg-rose-500/20 text-rose-300 animate-pulse'
+                : 'border-slate-700 bg-slate-950/80 text-slate-300 hover:border-sky-500/50 hover:text-sky-300')}>
+            <Mic size={14} /> {listening ? 'LISTENING' : 'Voice'}
+          </button>
+          <div role="group" aria-label="Voice input language" className="flex items-center rounded-full border border-slate-700 bg-slate-950/90 p-0.5 font-mono text-[10px] font-bold">
+            {[['en-US', 'EN', 'English'], ['ar-EG', 'AR', 'Arabic']].map(([lang, label, name]) => (
+              <button key={lang} type="button" aria-label={name + ' voice input'} aria-pressed={listenLang === lang}
+                onClick={() => selectListenLanguage(lang)} title={name + ' voice input'}
+                className={'rounded-full px-2 py-1 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-400 ' +
+                  (listenLang === lang ? 'bg-sky-500/20 text-sky-300 shadow-inner' : 'text-slate-500 hover:text-slate-200')}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
         <button type="submit"
           className="flex items-center gap-1.5 rounded-lg border border-sky-500/50 bg-sky-500/15 px-3 py-2 font-mono text-xs font-bold text-sky-300 transition-all hover:bg-sky-500/25">
           <Send size={13} /> SEND
